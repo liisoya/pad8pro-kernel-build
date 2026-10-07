@@ -59,7 +59,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev libgmp-dev \
             gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
-            python3 ccache kmod rsync
+            python3 ccache kmod rsync zstd
 
       # key 用内核自身 SHA：同一内核版本反复构建能命中缓存，
       # 内核换 commit 时自动失效。
@@ -93,10 +93,24 @@ jobs:
           set -euo pipefail
           KVER=$(make -s -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out kernelrelease)
           mkdir -p out-root
+          # INSTALL_MOD_STRIP=1 去掉 .ko 调试符号：universal_defconfig 有 6848 个模块，
+          # 不 strip 时 modules.tar.gz 会到 2.9GB，对刷机没有任何用处。
           make -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out \
-            modules_install INSTALL_MOD_PATH="$PWD/out-root"
+            modules_install INSTALL_MOD_PATH="$PWD/out-root" INSTALL_MOD_STRIP=1
           sudo depmod -b "$PWD/out-root" "$KVER"
           printf '%s\n' "$KVER" > kver.txt
+
+      - name: 诊断模块体积构成
+        run: |
+          echo "=== 模块数量 ==="
+          find out-root/lib/modules -name '*.ko' | wc -l
+          echo "=== strip 后未压缩总量 ==="
+          du -sh out-root/lib/modules
+          echo "=== drivers 子目录 top 20 ==="
+          du -sh out-root/lib/modules/*/kernel/drivers/*/ 2>/dev/null | sort -rh | head -20
+          echo "=== 单个最大模块 top 10 ==="
+          find out-root/lib/modules -name '*.ko' -printf '%s\t%p\n' | sort -rn | head -10 \
+            | awk -F'\t' '{printf "%6.1f MB\t%s\n", $1/1048576, $2}'
 
       # 构建失败时保留 .config，否则只能靠重跑本地复现来定位
       - name: 保留失败现场的配置
@@ -109,7 +123,7 @@ jobs:
           path: linux/out/.config
           retention-days: 7
 
-      - name: 收集产物
+      - name: 收集内核产物
         run: |
           set -euo pipefail
           KVER=$(cat kver.txt)
@@ -119,19 +133,38 @@ jobs:
           cp linux/out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb "$DST/boot/"
           cp linux/out/.config "$DST/config"
           cp linux/out/System.map "$DST/System.map"
-          tar -C out-root -czf "dist/modules-$KVER.tar.gz" lib/modules
           printf 'repo=%s\nref=%s\ncommit=%s\n' \
             "$KERNEL_REPO" "$KERNEL_REF" "${{ steps.kernel.outputs.sha }}" \
             > "$DST/build-info.txt"
-          ( cd dist && find . -type f -not -name SHA256SUMS -print0 \
-              | sort -z | xargs -0 sha256sum > SHA256SUMS )
-          cat dist/SHA256SUMS
 
-      - name: 上传产物
+      - name: 打包内核模块
+        run: |
+          set -euo pipefail
+          KVER=$(cat kver.txt)
+          tar -C out-root --zstd -cf "dist/modules-$KVER.tar.zst" lib/modules
+          ls -lh "dist/modules-$KVER.tar.zst"
+          # 校验清单放进核心 artifact 内部，否则不会被任何 artifact 收走
+          ( cd dist && find . -type f -not -name SHA256SUMS -print0 \
+              | sort -z | xargs -0 sha256sum > "pad8pro-$KVER/SHA256SUMS" )
+          echo "=== SHA256SUMS ==="
+          cat "dist/pad8pro-$KVER/SHA256SUMS"
+
+      # 核心产物几十 MB，单独一个 artifact，刷机时只需要下载它。
+      - name: 上传内核产物
         uses: actions/upload-artifact@v4
         with:
           name: pad8pro-kernel-${{ steps.kernel.outputs.sha }}
           if-no-files-found: error
           include-hidden-files: true
-          path: dist/
+          path: dist/pad8pro-*
           retention-days: 30
+
+      # 模块体积大、下载慢，和核心产物分开，避免每次都要下 2.9G。
+      - name: 上传内核模块
+        uses: actions/upload-artifact@v4
+        with:
+          name: pad8pro-modules-${{ steps.kernel.outputs.sha }}
+          if-no-files-found: error
+          include-hidden-files: true
+          path: dist/modules-*.tar.zst
+          retention-days: 14
