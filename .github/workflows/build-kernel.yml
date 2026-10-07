@@ -50,6 +50,17 @@ jobs:
           echo "=== 清理后 ==="
           df -h /
 
+      # 【必须先检出本仓库】configs/ 和 tools/ 都属于本仓库，不属于内核仓库。
+      # 之前只做了下面那个「检出内核源码」（path: linux），$GITHUB_WORKSPACE 里
+      # 根本没有 configs/，于是「补齐 Pad 8 Pro 必需驱动」一步直接
+      # 报「缺少配置片段 …/configs/pad8pro-required.config」而失败。
+      # 内核源码必须放到子目录 linux/，否则会和本仓库的工作区冲突。
+      - name: 检出本仓库（configs / tools）
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: 检出内核源码
         uses: actions/checkout@v4
         with:
@@ -156,6 +167,9 @@ jobs:
           test -f "$FRAG" || { echo "::error::缺少配置片段 $FRAG"; exit 1; }
           echo "=== 追加片段 ==="
           cat "$FRAG"
+          # 先补一个换行：若 .config 末尾没有换行符，直接 >> 会把第一行
+          # 拼到上一行末尾，olddefconfig 会静默忽略整个片段。
+          printf '\n' >> out/.config
           cat "$FRAG" >> out/.config
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out olddefconfig
 

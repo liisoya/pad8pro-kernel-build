@@ -1,3 +1,7 @@
 out-root/
 dist/
 kver.txt
+# 本地下载/展开的第三方工具与内核源码，不入库
+tools/local/
+upstream/
+__pycache__/
