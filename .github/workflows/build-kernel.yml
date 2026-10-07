@@ -1,0 +1,137 @@
+name: pad8pro-kernel
+
+# 只在手动触发时构建：内核是上游 BigfootACA/linux 的固定 commit，
+# 我们的仓库里没有内核代码，push 触发没有意义。
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "内核 ref：分支名或 commit SHA（建议填 SHA，作者会 rebase/force-push）"
+        required: false
+        default: "469998695964bc26493861cd11f8c17aa764f2e5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pad8pro-kernel-${{ inputs.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  KERNEL_REPO: BigfootACA/linux
+  KERNEL_REF: ${{ inputs.ref }}
+  CROSS_COMPILE: aarch64-linux-gnu-
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      # Linux 7.1 + sm8750 带全模块要 20GB+，runner 只有约 15GB。
+      # 6pro 的 CI 不需要这步，他的 sm8450 内核小得多。
+      - name: 释放 runner 磁盘空间
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift
+          echo "=== 清理后 ==="
+          df -h /
+
+      - name: 检出内核源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_REF }}
+          path: linux
+          persist-credentials: false
+          # 只取该 commit 的树，不拉 5.9GB 历史。
+          # universal_defconfig 没有 LOCALVERSION_AUTO，编译不依赖 git 描述。
+          fetch-depth: 1
+
+      - name: 记录内核版本
+        id: kernel
+        working-directory: linux
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bc bison flex libssl-dev libelf-dev libgmp-dev \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
+            python3 ccache kmod rsync
+
+      # key 用内核自身 SHA：同一内核版本反复构建能命中缓存，
+      # 内核换 commit 时自动失效。
+      - name: 恢复 ccache 缓存
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: pad8pro-ccache-${{ runner.os }}-${{ steps.kernel.outputs.sha }}
+          restore-keys: pad8pro-ccache-${{ runner.os }}-
+          max-size: 5GB
+
+      - name: 配置内核
+        working-directory: linux
+        env:
+          CCACHE_MAXSIZE: 5G
+        run: |
+          make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out universal_defconfig
+          grep -q 'sm8750-xiaomi-piano.dtb' arch/arm64/boot/dts/qcom/Makefile \
+            || { echo "piano dtb 未在 dts/qcom/Makefile 注册"; exit 1; }
+          grep -E '^CONFIG_(ARCH_QCOM|MODULES|PREEMPT)=' out/.config
+
+      - name: 编译 Image 与设备树
+        working-directory: linux
+        run: make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out -j"$(nproc)" Image dtbs
+
+      - name: 编译内核模块
+        working-directory: linux
+        run: make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out -j"$(nproc)" modules
+
+      - name: 安装模块到暂存目录
+        run: |
+          set -euo pipefail
+          KVER=$(make -s -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out kernelrelease)
+          mkdir -p out-root
+          make -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out \
+            modules_install INSTALL_MOD_PATH="$PWD/out-root"
+          sudo depmod -b "$PWD/out-root" "$KVER"
+          printf '%s\n' "$KVER" > kver.txt
+
+      # 构建失败时保留 .config，否则只能靠重跑本地复现来定位
+      - name: 保留失败现场的配置
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pad8pro-config-failure-${{ steps.kernel.outputs.sha }}
+          if-no-files-found: ignore
+          include-hidden-files: true
+          path: linux/out/.config
+          retention-days: 7
+
+      - name: 收集产物
+        run: |
+          set -euo pipefail
+          KVER=$(cat kver.txt)
+          DST="dist/pad8pro-$KVER"
+          mkdir -p "$DST/boot"
+          cp linux/out/arch/arm64/boot/Image "$DST/boot/Image"
+          cp linux/out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb "$DST/boot/"
+          cp linux/out/.config "$DST/config"
+          cp linux/out/System.map "$DST/System.map"
+          tar -C out-root -czf "dist/modules-$KVER.tar.gz" lib/modules
+          printf 'repo=%s\nref=%s\ncommit=%s\n' \
+            "$KERNEL_REPO" "$KERNEL_REF" "${{ steps.kernel.outputs.sha }}" \
+            > "$DST/build-info.txt"
+          ( cd dist && find . -type f -not -name SHA256SUMS -print0 \
+              | sort -z | xargs -0 sha256sum > SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: pad8pro-kernel-${{ steps.kernel.outputs.sha }}
+          if-no-files-found: error
+          include-hidden-files: true
+          path: dist/
+          retention-days: 30
