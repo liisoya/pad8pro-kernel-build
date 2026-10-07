@@ -35,10 +35,10 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
-    # config_only：只做「配置 -> 补齐驱动 -> 编 dtb -> 审计」，跳过全部编译。
-    # 用 job 级 if 而不是逐步骤 if，这样连依赖安装和 5.9GB checkout 都能跳过，
-    # 3 分钟内拿到权威的驱动审计报告。
-    if: ${{ inputs.config_only != 'true' }}
+    # config_only 模式靠各编译步骤上的 `if: inputs.config_only != 'true'`
+    # 跳过编译，保留 checkout / 配置 / 编 dtb / 驱动审计这几步，
+    # 约 5 分钟即可拿到权威报告（曾经在这里加过 job 级 if，方向写反导致
+    # config_only 时整个 job 被 skipped，已移除）。
     steps:
       # Linux 7.1 + sm8750 带全模块要 20GB+，runner 只有约 15GB。
       # 6pro 的 CI 不需要这步，他的 sm8450 内核小得多。
