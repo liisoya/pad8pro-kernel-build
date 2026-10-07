@@ -173,16 +173,26 @@ jobs:
           cat "$FRAG" >> out/.config
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out olddefconfig
 
+          # 失败时最容易缺的就是这一段：同时打印目标符号与其关键依赖，
+          # 一眼看出是「符号不存在」还是「依赖没满足被 kbuild 降到 n」。
+          echo "=== olddefconfig 后的实际取值 ==="
+          grep -E '^(CONFIG_DRM_PANEL_NOVATEK_NT36532|CONFIG_HID_NANOSIC|CONFIG_CHARGER_SC8541|CONFIG_CHARGER_SC96231|CONFIG_DRM_MIPI_DSI|CONFIG_BACKLIGHT_CLASS_DEVICE|CONFIG_I2C|CONFIG_DRM_MSM)=' out/.config \
+            || echo "（以上符号一个都没出现）"
+
           echo
           echo "=== 片段生效情况 ==="
+          # 片段里每行形如「CONFIG_FOO=m」，必须只取 = 左边的符号名去查 .config。
+          # 之前直接拿整行当符号，拼出的模式是 ^CONFIG_FOO=m=[ym]，永远匹配不上，
+          # 于是四个驱动全被误报成「未生效」，NT36532 的硬失败断言必然触发。
           missing=""
-          while read -r opt; do
-            case "$opt" in \#*|'') continue ;; esac
-            if grep -q "^$opt=[ym]" out/.config; then
-              printf '  OK   %s=%s\n' "$opt" "$(grep -m1 "^$opt=" out/.config | cut -d= -f2)"
+          while read -r line; do
+            case "$line" in \#*|'') continue ;; esac
+            sym=${line%%=*}
+            if grep -q "^$sym=[ym]" out/.config; then
+              printf '  OK   %s=%s\n' "$sym" "$(grep -m1 "^$sym=" out/.config | cut -d= -f2)"
             else
-              printf '  WARN %s 未生效（该 Kconfig 符号可能不存在）\n' "$opt"
-              missing="$missing $opt"
+              printf '  WARN %s 未生效（Kconfig 无此符号或依赖不满足）\n' "$sym"
+              missing="$missing $sym"
             fi
           done < "$FRAG"
 
