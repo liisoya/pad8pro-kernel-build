@@ -77,10 +77,15 @@ jobs:
         working-directory: linux
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      # apt 挂住会白烧掉整个 6 小时窗口。2026-10-07 真的发生过一次：
+      # 这一步从 19:51 卡到 21:07（75 分钟无任何输出）才发现，整轮作废。
+      # 给 apt 加超时和重试，让它快速失败而不是静默挂起。
       - name: 安装构建依赖
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          APT_OPTS=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=3)
+          timeout 600 sudo apt-get update "${APT_OPTS[@]}"
+          timeout 900 sudo apt-get install -y --no-install-recommends "${APT_OPTS[@]}" \
             build-essential bc bison flex libssl-dev libelf-dev libgmp-dev \
             gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
             python3 ccache kmod rsync zstd device-tree-compiler
