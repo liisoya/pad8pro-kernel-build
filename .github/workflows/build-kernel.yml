@@ -272,8 +272,11 @@ jobs:
           set -euo pipefail
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
             -j"$(nproc)" modules 2>&1 | tee build-modules.log
-          # 关键模块必须存在。drm_msm 是模块而非内建，缺了就出不了画面。
-          for pat in 'drm_msm.ko' 'ath11k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko'; do
+          # 关键模块必须存在。msm 是模块而非内建，缺了就出不了画面。
+          # 注意模块名是 msm.ko 而不是 drm_msm.ko：drivers/gpu/drm/msm/Makefile
+          # 写的是 obj-$(CONFIG_DRM_MSM) += msm.o。之前写成 drm_msm.ko，
+          # 整个模块编译（3 小时）成功后被这条断言判失败。
+          for pat in 'msm.ko' 'ath11k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko'; do
             if ! find out -name "$pat" -print -quit | grep -q .; then
               echo "::error::关键模块缺失: $pat"
               echo "  提示：面板/键盘驱动若显示为 WARN，请检查 configs/pad8pro-required.config"
