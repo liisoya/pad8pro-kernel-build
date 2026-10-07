@@ -14,13 +14,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: pad8pro-kernel-${{ inputs.ref }}-${{ github.run_id }}
-  cancel-in-progress: false
+  # 固定 group：同一时间只允许一个构建，手动重复触发会取消前一个，
+  # 避免并行白烧 Actions 配额（4 核 runner 一次约 2.5 小时）。
+  group: pad8pro-kernel
+  cancel-in-progress: true
 
 env:
   KERNEL_REPO: BigfootACA/linux
   KERNEL_REF: ${{ inputs.ref }}
   CROSS_COMPILE: aarch64-linux-gnu-
+  # ccache 自身压缩缓存。内核有 6848 个模块，缓存很容易超过 5GB 上限被 LRU 淘汰，
+  # 压缩后能多留一倍多的对象，显著提高命中率。
+  CCACHE_COMPRESS: "1"
+  # 注意：不能在这里设 CC/HOSTCC。GNU make 中环境变量优先级低于 Makefile 里的
+  # `CC = $(CROSS_COMPILE)gcc`，会被静默覆盖，ccache 依然不生效。
+  # 正确做法见下面的「配置 ccache 编译器 wrapper」步骤。
 
 jobs:
   build:
@@ -61,6 +69,23 @@ jobs:
             gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
             python3 ccache kmod rsync zstd
 
+      # ccache 必须真正接管编译器，否则缓存里一个对象都不会有。
+      # 用 PATH wrapper 而不是 env CC：kbuild 的子 make 也会走同一个 wrapper，
+      # 且不会被 Makefile 里的 `CC = $(CROSS_COMPILE)gcc` 覆盖。
+      - name: 配置 ccache 编译器 wrapper
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/ccache-wrapper"
+          cat > "$HOME/ccache-wrapper/aarch64-linux-gnu-gcc" <<'EOF'
+          #!/bin/sh
+          exec ccache aarch64-linux-gnu-gcc "$@"
+          EOF
+          chmod +x "$HOME/ccache-wrapper/aarch64-linux-gnu-gcc"
+          echo "$HOME/ccache-wrapper" >> "$GITHUB_PATH"
+          # 确认 wrapper 命中，且 ccache 真的在转发
+          which aarch64-linux-gnu-gcc
+          aarch64-linux-gnu-gcc --version | head -1
+
       # key 用内核自身 SHA：同一内核版本反复构建能命中缓存，
       # 内核换 commit 时自动失效。
       - name: 恢复 ccache 缓存
@@ -70,23 +95,84 @@ jobs:
           restore-keys: pad8pro-ccache-${{ runner.os }}-
           max-size: 5GB
 
+      - name: 校验输入
+        run: |
+          set -euo pipefail
+          if [ -z "$KERNEL_REF" ]; then
+            echo "::error::必须填写内核 ref（分支名或 commit SHA）"
+            exit 1
+          fi
+          echo "内核 ref: $KERNEL_REF"
+
       - name: 配置内核
         working-directory: linux
         env:
           CCACHE_MAXSIZE: 5G
         run: |
+          set -euo pipefail
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out universal_defconfig
+          # 校验 1：dtb 在 qcom/Makefile 中注册
           grep -q 'sm8750-xiaomi-piano.dtb' arch/arm64/boot/dts/qcom/Makefile \
-            || { echo "piano dtb 未在 dts/qcom/Makefile 注册"; exit 1; }
+            || { echo "::error::piano dtb 未在 dts/qcom/Makefile 注册"; exit 1; }
+          # 校验 2：关键配置存在
           grep -E '^CONFIG_(ARCH_QCOM|MODULES|PREEMPT)=' out/.config
+          # 记录 Image 压缩格式：universal_defconfig 开了 CONFIG_KERNEL_ZSTD，
+          # 产出的 Image 是 zstd 压缩的，打 boot.img 时 bootloader 必须支持
+          # Android boot image v4 的 zstd kernel。
+          if grep -q '^CONFIG_KERNEL_ZSTD=y' out/.config; then
+            echo "Image 压缩: zstd（boot header 需 v4+）" | tee -a "$GITHUB_STEP_SUMMARY"
+          elif grep -q '^CONFIG_KERNEL_LZ4=y' out/.config; then
+            echo "Image 压缩: lz4" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Image 压缩: 未压缩" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: 编译 Image 与设备树
         working-directory: linux
-        run: make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out -j"$(nproc)" Image dtbs
+        run: |
+          set -euo pipefail
+          make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
+            -j"$(nproc)" Image dtbs 2>&1 | tee build-image.log
+          # 校验 3：dtb 真的生成了（只查 Makefile 注册不够，构建中断也会留下注册行）
+          test -f out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb \
+            || { echo "::error::sm8750-xiaomi-piano.dtb 未生成"; exit 1; }
+          # 反序列化确认确实是这台机器的设备树，防止上游同名文件被改坏
+          dtc -I dtb -O dts out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb 2>/dev/null \
+            | grep -q 'xiaomi,piano' \
+            || { echo "::error::dtb 里没有 compatible = xiaomi,piano"; exit 1; }
+          ls -lh out/arch/arm64/boot/Image \
+                  out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb
+
+      # 早期断言：Image 阶段编译了上千个 .o，如果 ccache 没真正接管编译器，
+      # Cacheable calls 会是 0。这里 16 分钟就能发现，不必等两小时。
+      - name: 确认 ccache 生效
+        run: |
+          set -euo pipefail
+          ccache -s | tee /tmp/ccache-stats.txt
+          if ! grep -qE 'Cacheable calls:[[:space:]]+[1-9]' /tmp/ccache-stats.txt; then
+            echo "::error::ccache 未接管编译器（Cacheable calls 为 0），缓存不会被保存"
+            exit 1
+          fi
+          { echo "## ccache"
+            echo '```'
+            cat /tmp/ccache-stats.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 编译内核模块
         working-directory: linux
-        run: make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out -j"$(nproc)" modules
+        run: |
+          set -euo pipefail
+          make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
+            -j"$(nproc)" modules 2>&1 | tee build-modules.log
+          # 校验 4：关键模块必须存在。drm_msm 是模块而非内建，缺了就出不了画面。
+          for pat in 'drm_msm\.ko' 'ath11k.*\.ko' 'nt36532.*\.ko' 'nanosic.*\.ko'; do
+            if ! find out -name "$pat" -print -quit | grep -q .; then
+              echo "::error::关键模块缺失: $pat（显示/WiFi/触摸/键盘会不可用）"
+              exit 1
+            fi
+            echo "OK  $pat -> $(find out -name "$pat" -printf '%p\n' | head -1)"
+          done
 
       - name: 安装模块到暂存目录
         run: |
@@ -95,6 +181,7 @@ jobs:
           mkdir -p out-root
           # INSTALL_MOD_STRIP=1 去掉 .ko 调试符号：universal_defconfig 有 6848 个模块，
           # 不 strip 时 modules.tar.gz 会到 2.9GB，对刷机没有任何用处。
+          # 安全性：universal_defconfig 未开启 CONFIG_MODULE_SIG，strip 不会破坏签名。
           make -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out \
             modules_install INSTALL_MOD_PATH="$PWD/out-root" INSTALL_MOD_STRIP=1
           sudo depmod -b "$PWD/out-root" "$KVER"
@@ -106,21 +193,30 @@ jobs:
           find out-root/lib/modules -name '*.ko' | wc -l
           echo "=== strip 后未压缩总量 ==="
           du -sh out-root/lib/modules
-          echo "=== drivers 子目录 top 20 ==="
+          echo "=== drivers 子目录 top 20（判断是否值得裁剪）==="
           du -sh out-root/lib/modules/*/kernel/drivers/*/ 2>/dev/null | sort -rh | head -20
           echo "=== 单个最大模块 top 10 ==="
           find out-root/lib/modules -name '*.ko' -printf '%s\t%p\n' | sort -rn | head -10 \
             | awk -F'\t' '{printf "%6.1f MB\t%s\n", $1/1048576, $2}'
+          {
+            echo "## 模块构成"
+            echo ""
+            echo "- 模块数: $(find out-root/lib/modules -name '*.ko' | wc -l)"
+            echo "- strip 后未压缩: $(du -sh out-root/lib/modules | cut -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # 构建失败时保留 .config，否则只能靠重跑本地复现来定位
-      - name: 保留失败现场的配置
+      # 构建失败时保留 .config 和编译日志尾部，否则只能靠重跑本地复现来定位
+      - name: 保留失败现场
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: pad8pro-config-failure-${{ steps.kernel.outputs.sha }}
           if-no-files-found: ignore
           include-hidden-files: true
-          path: linux/out/.config
+          path: |
+            linux/out/.config
+            linux/build-image.log
+            linux/build-modules.log
           retention-days: 7
 
       - name: 收集内核产物
@@ -133,9 +229,28 @@ jobs:
           cp linux/out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb "$DST/boot/"
           cp linux/out/.config "$DST/config"
           cp linux/out/System.map "$DST/System.map"
-          printf 'repo=%s\nref=%s\ncommit=%s\n' \
-            "$KERNEL_REPO" "$KERNEL_REF" "${{ steps.kernel.outputs.sha }}" \
-            > "$DST/build-info.txt"
+          # config 的 sha256 必须记进产物：6pro 的做法，换 config 后无法区分是哪套配置出的包
+          CFG_SHA=$(sha256sum linux/out/.config | cut -d' ' -f1)
+          IMG_COMP=$(sed -n 's/^CONFIG_KERNEL_\(ZSTD\|LZ4\|GZIP\)=y/\1/p' linux/out/.config | head -1)
+          IMG_SIZE=$(stat -c%s "$DST/boot/Image")
+          cat > "$DST/build-info.txt" <<EOF
+          repo=$KERNEL_REPO
+          ref=$KERNEL_REF
+          commit=${{ steps.kernel.outputs.sha }}
+          kernelrelease=$KVER
+          config_sha256=$CFG_SHA
+          image_bytes=$IMG_SIZE
+          image_compression=${IMG_COMP:-none}
+          module_count=$(find out-root/lib/modules -name '*.ko' | wc -l)
+          modules_stripped=yes
+          EOF
+          cat "$DST/build-info.txt"
+          { echo "## 构建信息"
+            echo ""
+            echo '```'
+            cat "$DST/build-info.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 打包内核模块
         run: |
@@ -160,6 +275,7 @@ jobs:
           retention-days: 30
 
       # 模块体积大、下载慢，和核心产物分开，避免每次都要下 2.9G。
+      # retention 与核心产物一致：刷机可能失败重试，两份文件的有效期不该错开。
       - name: 上传内核模块
         uses: actions/upload-artifact@v4
         with:
@@ -167,4 +283,4 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           path: dist/modules-*.tar.zst
-          retention-days: 14
+          retention-days: 30
