@@ -9,6 +9,10 @@ on:
         description: "内核 ref：分支名或 commit SHA（建议填 SHA，作者会 rebase/force-push）"
         required: false
         default: "469998695964bc26493861cd11f8c17aa764f2e5"
+      config_only:
+        description: "只跑到配置阶段并输出驱动审计报告（约 3 分钟，不编译）"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -23,9 +27,6 @@ env:
   KERNEL_REPO: BigfootACA/linux
   KERNEL_REF: ${{ inputs.ref }}
   CROSS_COMPILE: aarch64-linux-gnu-
-  # ccache 自身压缩缓存。内核有 6848 个模块，缓存很容易超过 5GB 上限被 LRU 淘汰，
-  # 压缩后能多留一倍多的对象，显著提高命中率。
-  CCACHE_COMPRESS: "1"
   # 注意：不能在这里设 CC/HOSTCC。GNU make 中环境变量优先级低于 Makefile 里的
   # `CC = $(CROSS_COMPILE)gcc`，会被静默覆盖，ccache 依然不生效。
   # 正确做法见下面的「配置 ccache 编译器 wrapper」步骤。
@@ -67,15 +68,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential bc bison flex libssl-dev libelf-dev libgmp-dev \
             gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
-            python3 ccache kmod rsync zstd
+            python3 ccache kmod rsync zstd device-tree-compiler
 
       # ccache 必须真正接管编译器，否则缓存里一个对象都不会有。
       # 用 PATH wrapper 而不是 env CC：kbuild 的子 make 也会走同一个 wrapper，
       # 且不会被 Makefile 里的 `CC = $(CROSS_COMPILE)gcc` 覆盖。
       #
-      # wrapper 内必须用编译器的【绝对路径】：wrapper 本身叫 aarch64-linux-gnu-gcc
-      # 且置于 PATH 最前，若内部按名字查找会再次命中自己，形成无限递归，
-      # 表现为 make 刚启动就卡死（踩过一次，27 分钟才发现）。
+      # 两个必须做对的地方：
+      #  1. wrapper 内必须用编译器【绝对路径】。wrapper 本身叫 aarch64-linux-gnu-gcc
+      #     且置于 PATH 最前，若内部按名字查找会再次命中自己 → 无限 fork 递归。
+      #  2. 必须在本 step 内 export PATH。$GITHUB_PATH 只对【后续】step 生效，
+      #     只写 $GITHUB_PATH 的话自检会走真实编译器，ccache 一次都没被调用。
       - name: 配置 ccache 编译器 wrapper
         run: |
           set -euo pipefail
@@ -89,7 +92,17 @@ jobs:
           EOF
           chmod +x "$HOME/ccache-wrapper/aarch64-linux-gnu-gcc"
           cat "$HOME/ccache-wrapper/aarch64-linux-gnu-gcc"
+          # 当前 step 立即生效 + 后续 step 生效
+          export PATH="$HOME/ccache-wrapper:$PATH"
           echo "$HOME/ccache-wrapper" >> "$GITHUB_PATH"
+
+          # 压缩：ccache 4.10 起改用配置文件项，4.9 及以前用环境变量。
+          # 两种方式都尝试，失败不致命（压缩只是优化，不影响命中率）。
+          ccache --set-config=compression=true 2>/dev/null \
+            && echo "ccache: 已用 --set-config 开启压缩" \
+            || ccache --compress 2>/dev/null \
+            && echo "ccache: 已用 --compress 开启压缩" \
+            || echo "ccache: 压缩不可用（非致命）"
 
           # 自检：编译两次。timeout 保证递归卡死时 60 秒内失败而不是挂住整个 job。
           printf 'int probe(void){return 0;}\n' > /tmp/probe.c
@@ -125,41 +138,78 @@ jobs:
         run: |
           set -euo pipefail
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out universal_defconfig
-          # 校验 1：dtb 在 qcom/Makefile 中注册
           grep -q 'sm8750-xiaomi-piano.dtb' arch/arm64/boot/dts/qcom/Makefile \
             || { echo "::error::piano dtb 未在 dts/qcom/Makefile 注册"; exit 1; }
-          # 校验 2：关键配置存在
           grep -E '^CONFIG_(ARCH_QCOM|MODULES|PREEMPT)=' out/.config
-          # 记录 Image 压缩格式：universal_defconfig 开了 CONFIG_KERNEL_ZSTD，
-          # 产出的 Image 是 zstd 压缩的，打 boot.img 时 bootloader 必须支持
-          # Android boot image v4 的 zstd kernel。
-          if grep -q '^CONFIG_KERNEL_ZSTD=y' out/.config; then
-            echo "Image 压缩: zstd（boot header 需 v4+）" | tee -a "$GITHUB_STEP_SUMMARY"
-          elif grep -q '^CONFIG_KERNEL_LZ4=y' out/.config; then
-            echo "Image 压缩: lz4" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Image 压缩: 未压缩" | tee -a "$GITHUB_STEP_SUMMARY"
-          fi
 
+      # universal_defconfig 采用 allnoconfig 语义：没写到的选项 = n。
+      # 它漏掉了 Pad 8 Pro 的显示/键盘/充电驱动，必须补齐，否则黑屏。
+      - name: 补齐 Pad 8 Pro 必需驱动
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          FRAG="$GITHUB_WORKSPACE/configs/pad8pro-required.config"
+          test -f "$FRAG" || { echo "::error::缺少配置片段 $FRAG"; exit 1; }
+          echo "=== 追加片段 ==="
+          cat "$FRAG"
+          cat "$FRAG" >> out/.config
+          make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out olddefconfig
+
+          echo
+          echo "=== 片段生效情况 ==="
+          missing=""
+          while read -r opt; do
+            case "$opt" in \#*|'') continue ;; esac
+            if grep -q "^$opt=[ym]" out/.config; then
+              printf '  OK   %s=%s\n' "$opt" "$(grep -m1 "^$opt=" out/.config | cut -d= -f2)"
+            else
+              printf '  WARN %s 未生效（该 Kconfig 符号可能不存在）\n' "$opt"
+              missing="$missing $opt"
+            fi
+          done < "$FRAG"
+
+          # 显示驱动缺失 = 刷机必然黑屏，必须硬失败。
+          case "$missing" in
+            *CONFIG_DRM_PANEL_NOVATEK_NT36532*)
+              echo "::error::面板驱动 NT36532 未能启用，构建无意义"
+              exit 1 ;;
+          esac
+
+      # 用编译出的 dtb 反查内核源码：哪些 compatible 找不到任何驱动。
+      # 这是权威答案，不靠猜 Kconfig 名。
+      - name: 审计 dtb 中每个器件的内核驱动
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          dtc -I dtb -O dts out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb \
+            > /tmp/piano.dts 2>/dev/null || true
+          {
+            echo "## dtb 驱动审计"
+            echo ""
+            echo '```'
+            python3 ../tools/audit-dt-drivers.py /tmp/piano.dts . out/.config || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # config_only 模式到此为止：不进编译，3 分钟拿到报告
       - name: 编译 Image 与设备树
+        if: inputs.config_only != 'true'
         working-directory: linux
         run: |
           set -euo pipefail
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
             -j"$(nproc)" Image dtbs 2>&1 | tee build-image.log
-          # 校验 3：dtb 真的生成了（只查 Makefile 注册不够，构建中断也会留下注册行）
+          test -f out/arch/arm64/boot/Image \
+            || { echo "::error::Image 未生成"; exit 1; }
           test -f out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb \
             || { echo "::error::sm8750-xiaomi-piano.dtb 未生成"; exit 1; }
-          # 反序列化确认确实是这台机器的设备树，防止上游同名文件被改坏
-          dtc -I dtb -O dts out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb 2>/dev/null \
-            | grep -q 'xiaomi,piano' \
-            || { echo "::error::dtb 里没有 compatible = xiaomi,piano"; exit 1; }
           ls -lh out/arch/arm64/boot/Image \
                   out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb
 
       # 早期断言：Image 阶段编译了上千个 .o，如果 ccache 没真正接管编译器，
-      # Cacheable calls 会是 0。这里 16 分钟就能发现，不必等两小时。
+      # Cacheable calls 会是 0。这里十几分钟就能发现，不必等两小时。
       - name: 确认 ccache 生效
+        if: inputs.config_only != 'true'
         run: |
           set -euo pipefail
           ccache -s | tee /tmp/ccache-stats.txt
@@ -174,44 +224,47 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 编译内核模块
+        if: inputs.config_only != 'true'
         working-directory: linux
         run: |
           set -euo pipefail
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
             -j"$(nproc)" modules 2>&1 | tee build-modules.log
-          # 校验 4：关键模块必须存在。drm_msm 是模块而非内建，缺了就出不了画面。
-          for pat in 'drm_msm\.ko' 'ath11k.*\.ko' 'nt36532.*\.ko' 'nanosic.*\.ko'; do
+          # 关键模块必须存在。drm_msm 是模块而非内建，缺了就出不了画面。
+          for pat in 'drm_msm.ko' 'ath11k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko'; do
             if ! find out -name "$pat" -print -quit | grep -q .; then
-              echo "::error::关键模块缺失: $pat（显示/WiFi/触摸/键盘会不可用）"
+              echo "::error::关键模块缺失: $pat"
+              echo "  提示：面板/键盘驱动若显示为 WARN，请检查 configs/pad8pro-required.config"
               exit 1
             fi
-            echo "OK  $pat -> $(find out -name "$pat" -printf '%p\n' | head -1)"
+            echo "  OK  $pat -> $(find out -name "$pat" -printf '%p\n' | head -1)"
           done
 
       - name: 安装模块到暂存目录
+        if: inputs.config_only != 'true'
         run: |
           set -euo pipefail
           KVER=$(make -s -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out kernelrelease)
           mkdir -p out-root
           # INSTALL_MOD_STRIP=1 去掉 .ko 调试符号：universal_defconfig 有 6848 个模块，
           # 不 strip 时 modules.tar.gz 会到 2.9GB，对刷机没有任何用处。
-          # 安全性：universal_defconfig 未开启 CONFIG_MODULE_SIG，strip 不会破坏签名。
+          # 安全性：已核实 universal_defconfig 未开启 CONFIG_MODULE_SIG。
           make -C linux ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out \
             modules_install INSTALL_MOD_PATH="$PWD/out-root" INSTALL_MOD_STRIP=1
           sudo depmod -b "$PWD/out-root" "$KVER"
           printf '%s\n' "$KVER" > kver.txt
 
       - name: 诊断模块体积构成
+        if: inputs.config_only != 'true'
         run: |
           echo "=== 模块数量 ==="
           find out-root/lib/modules -name '*.ko' | wc -l
           echo "=== strip 后未压缩总量 ==="
           du -sh out-root/lib/modules
+          echo "=== 剩余磁盘 ==="
+          df -h / | tail -1
           echo "=== drivers 子目录 top 20（判断是否值得裁剪）==="
           du -sh out-root/lib/modules/*/kernel/drivers/*/ 2>/dev/null | sort -rh | head -20
-          echo "=== 单个最大模块 top 10 ==="
-          find out-root/lib/modules -name '*.ko' -printf '%s\t%p\n' | sort -rn | head -10 \
-            | awk -F'\t' '{printf "%6.1f MB\t%s\n", $1/1048576, $2}'
           {
             echo "## 模块构成"
             echo ""
@@ -234,6 +287,7 @@ jobs:
           retention-days: 7
 
       - name: 收集内核产物
+        if: inputs.config_only != 'true'
         run: |
           set -euo pipefail
           KVER=$(cat kver.txt)
@@ -243,16 +297,18 @@ jobs:
           cp linux/out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb "$DST/boot/"
           cp linux/out/.config "$DST/config"
           cp linux/out/System.map "$DST/System.map"
-          # config 的 sha256 必须记进产物：6pro 的做法，换 config 后无法区分是哪套配置出的包
+          # config 的 sha256 必须记进产物：换 config 后无法区分是哪套配置出的包
           CFG_SHA=$(sha256sum linux/out/.config | cut -d' ' -f1)
           IMG_COMP=$(sed -n 's/^CONFIG_KERNEL_\(ZSTD\|LZ4\|GZIP\)=y/\1/p' linux/out/.config | head -1)
           IMG_SIZE=$(stat -c%s "$DST/boot/Image")
+          FRAG_SHA=$(sha256sum "$GITHUB_WORKSPACE/configs/pad8pro-required.config" | cut -d' ' -f1)
           cat > "$DST/build-info.txt" <<EOF
           repo=$KERNEL_REPO
           ref=$KERNEL_REF
           commit=${{ steps.kernel.outputs.sha }}
           kernelrelease=$KVER
           config_sha256=$CFG_SHA
+          required_fragment_sha256=$FRAG_SHA
           image_bytes=$IMG_SIZE
           image_compression=${IMG_COMP:-none}
           module_count=$(find out-root/lib/modules -name '*.ko' | wc -l)
@@ -267,6 +323,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 打包内核模块
+        if: inputs.config_only != 'true'
         run: |
           set -euo pipefail
           KVER=$(cat kver.txt)
@@ -280,6 +337,7 @@ jobs:
 
       # 核心产物几十 MB，单独一个 artifact，刷机时只需要下载它。
       - name: 上传内核产物
+        if: inputs.config_only != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pad8pro-kernel-${{ steps.kernel.outputs.sha }}
@@ -291,6 +349,7 @@ jobs:
       # 模块体积大、下载慢，和核心产物分开，避免每次都要下 2.9G。
       # retention 与核心产物一致：刷机可能失败重试，两份文件的有效期不该错开。
       - name: 上传内核模块
+        if: inputs.config_only != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pad8pro-modules-${{ steps.kernel.outputs.sha }}
