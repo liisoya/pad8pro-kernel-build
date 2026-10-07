@@ -35,6 +35,10 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # config_only：只做「配置 -> 补齐驱动 -> 编 dtb -> 审计」，跳过全部编译。
+    # 用 job 级 if 而不是逐步骤 if，这样连依赖安装和 5.9GB checkout 都能跳过，
+    # 3 分钟内拿到权威的驱动审计报告。
+    if: ${{ inputs.config_only != 'true' }}
     steps:
       # Linux 7.1 + sm8750 带全模块要 20GB+，runner 只有约 15GB。
       # 6pro 的 CI 不需要这步，他的 sm8450 内核小得多。
@@ -175,36 +179,50 @@ jobs:
               exit 1 ;;
           esac
 
+      # 设备树编译很快（不需要编译内核），且审计步骤依赖 dtb，
+      # 所以 config_only 模式也要跑这一步。
+      - name: 编译设备树
+        working-directory: linux
+        run: |
+          set -euo pipefail
+          make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
+            -j"$(nproc)" dtbs 2>&1 | tee build-dtbs.log
+          DTB=out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb
+          test -f "$DTB" || { echo "::error::sm8750-xiaomi-piano.dtb 未生成"; exit 1; }
+          # 反序列化确认确实是这台机器的设备树，防止上游同名文件被改坏
+          dtc -I dtb -O dts "$DTB" > /tmp/piano.dts
+          grep -q 'xiaomi,piano' /tmp/piano.dts \
+            || { echo "::error::dtb 里没有 compatible = xiaomi,piano"; exit 1; }
+          grep -q 'novatek,nt36532' /tmp/piano.dts \
+            || { echo "::error::dtb 里没有面板 compatible novatek,nt36532"; exit 1; }
+          ls -lh "$DTB"
+
       # 用编译出的 dtb 反查内核源码：哪些 compatible 找不到任何驱动。
       # 这是权威答案，不靠猜 Kconfig 名。
       - name: 审计 dtb 中每个器件的内核驱动
         working-directory: linux
         run: |
           set -euo pipefail
-          dtc -I dtb -O dts out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb \
-            > /tmp/piano.dts 2>/dev/null || true
           {
             echo "## dtb 驱动审计"
             echo ""
             echo '```'
-            python3 ../tools/audit-dt-drivers.py /tmp/piano.dts . out/.config || true
+            python3 "$GITHUB_WORKSPACE/tools/audit-dt-drivers.py" \
+              /tmp/piano.dts . out/.config || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       # config_only 模式到此为止：不进编译，3 分钟拿到报告
-      - name: 编译 Image 与设备树
+      - name: 编译 Image
         if: inputs.config_only != 'true'
         working-directory: linux
         run: |
           set -euo pipefail
           make ARCH=arm64 CROSS_COMPILE=${{ env.CROSS_COMPILE }} O=out \
-            -j"$(nproc)" Image dtbs 2>&1 | tee build-image.log
+            -j"$(nproc)" Image 2>&1 | tee build-image.log
           test -f out/arch/arm64/boot/Image \
             || { echo "::error::Image 未生成"; exit 1; }
-          test -f out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb \
-            || { echo "::error::sm8750-xiaomi-piano.dtb 未生成"; exit 1; }
-          ls -lh out/arch/arm64/boot/Image \
-                  out/arch/arm64/boot/dts/qcom/sm8750-xiaomi-piano.dtb
+          ls -lh out/arch/arm64/boot/Image
 
       # 早期断言：Image 阶段编译了上千个 .o，如果 ccache 没真正接管编译器，
       # Cacheable calls 会是 0。这里十几分钟就能发现，不必等两小时。
