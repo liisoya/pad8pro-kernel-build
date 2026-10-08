@@ -5,3 +5,9 @@ kver.txt
 tools/local/
 upstream/
 __pycache__/
+
+# 线刷包（数 GB，不入库）
+Xiaomi_Pad8Pro*/
+piano_images_*/
+# 本地工具/代理脚本
+gh-proxy

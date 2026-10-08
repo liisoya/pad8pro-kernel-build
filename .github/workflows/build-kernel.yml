@@ -281,7 +281,9 @@ jobs:
           # 注意模块名是 msm.ko 而不是 drm_msm.ko：drivers/gpu/drm/msm/Makefile
           # 写的是 obj-$(CONFIG_DRM_MSM) += msm.o。之前写成 drm_msm.ko，
           # 整个模块编译（3 小时）成功后被这条断言判失败。
-          for pat in 'msm.ko' 'ath11k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko'; do
+          # 无线必须是 ath12k：piano 用 WCN7850 "Peach"（dmesg cnss-peach），
+          # 主线驱动是 ath12k。ath11k 是 liuqin 的 WCN6855 用的，之前写错了。
+          for pat in 'msm.ko' 'ath12k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko'; do
             if ! find out -name "$pat" -print -quit | grep -q .; then
               echo "::error::关键模块缺失: $pat"
               echo "  提示：面板/键盘驱动若显示为 WARN，请检查 configs/pad8pro-required.config"
