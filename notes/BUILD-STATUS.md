@@ -10,18 +10,35 @@
 
 ## 1. 结论先行
 
-构建链路本身是通的：**第一次运行（`95f9aff4`，2026-10-07 09:46）就成功产出了内核**，
-耗时 2h26m。之后连续 5 次失败，全部是**后加的改动**引入的，没有一次是内核本身编译不过。
+**构建已成功**。运行 `37687294982`（2026-10-07 21:08 → 21:22，冷缓存约 3 小时，
+热缓存仅 13 分 24 秒），产物已验证：
 
-已修复并验证通过的问题：
+| 产物 | 实测 |
+|---|---|
+| `Image` | 48,429,568 B，`Linux kernel ARM64 boot executable Image` |
+| `sm8750-xiaomi-piano.dtb` | 187,695 B，dtc 反序列化含 `compatible = "xiaomi,piano", "qcom,sm8750"` |
+| 模块 | 8743 个，`INSTALL_MOD_STRIP=1` 后 104 MB（此前未 strip 是 2.9 GB） |
+| Image 压缩 | ZSTD（`CONFIG_KERNEL_ZSTD=y`，boot header 需 v4+） |
+| 必需驱动 | 全部为 `=m` 且实际产出 `.ko` |
+
+构建链路本身一开始就是通的：第一次运行（`95f9aff4`）就成功出内核。
+之后连续 5 次失败**全部是后加改动引入的**，没有一次是内核编译不过。
+
+已修复并验证的问题：
 
 | # | 症状 | 根因 | 状态 |
 |---|---|---|---|
 | 1 | `缺少配置片段 .../configs/pad8pro-required.config` | workflow 只 checkout 了内核仓库，本仓库从未被检出 | 已修 |
 | 2 | 四个驱动全报「未生效」→ NT36532 硬失败 | 断言把整行 `CONFIG_FOO=m` 当符号名，拼出永不匹配的 `^CONFIG_FOO=m=[ym]` | 已修 |
-| 3 | ccache wrapper 自检失败（第二次编译未命中） | 只写 `$GITHUB_PATH`，对**当前** step 不生效 | 前一轮已修 |
-| 4 | `configure kernel` 卡死 27 分钟 | wrapper 内按名字找编译器 → 命中自己 → 无限递归 | 前一轮已修 |
-| 5 | 驱动审计步骤预计 20+ 分钟 | 对每个 compatible 都 rglob 一遍全树 | 已修（改为单次建倒排索引） |
+| 3 | ccache wrapper 自检失败（第二次编译未命中） | 只写 `$GITHUB_PATH`，对**当前** step 不生效 | 已修 |
+| 4 | `configure kernel` 卡死 27 分钟 | wrapper 内按名字找编译器 → 命中自己 → 无限递归 | 已修 |
+| 5 | 驱动审计步骤预计 20+ 分钟 | 对每个 compatible 都 rglob 一遍全树 | 已修（单次建倒排索引） |
+| 6 | **模块编译 3 小时成功后判失败** | 断言写 `drm_msm.ko`，实际是 `msm.ko`（`Makefile: obj-$(CONFIG_DRM_MSM) += msm.o`） | 已修 |
+| 7 | `apt-get` 挂 75 分钟白烧一轮 | 无超时无重试，runner 侧 apt 源偶发挂起 | 已修（加 timeout + Acquire::Retries） |
+
+> **教训**：#6 最贵 —— 3 小时编译白跑，只因断言里的模块文件名是猜的。
+> 修复时把 4 个模块名逐一对照真实构建日志（或对应 Makefile）核实过：
+> `msm.ko` / `ath11k.ko` / `panel-novatek-nt36532.ko` / `hid-nanosic.ko`。
 
 ---
 
@@ -74,9 +91,11 @@ gh workflow run build-kernel.yml -R liisoya/pad8pro-kernel-build \
 
 ## 5. 待办
 
-- [ ] 完整构建产物验收（Image / dtb / 模块）
+- [x] 完整构建产物验收（Image / dtb / 模块）—— 见第 1 节
 - [ ] boot.img 打包：目前只产出裸 `Image`，刷机还需要 mkbootimg 打成镜像
       （`CONFIG_KERNEL_ZSTD=y`，boot header 需 v4+）
 - [ ] 面板/键盘驱动是 `=m`，刷机时需要把 `modules-*.tar.zst` 放进 initramfs
 - [ ] 用 `device/dts/android-runtime.dts`（厂商 Android 运行时设备树反编译产物）
       对照上游 dts，核对内存布局 / reserved-memory 差异
+- [ ] `device/dts/android-runtime.dts`、`tools/verify-ccache-wrapper.sh`、
+      `tools/fetch-aosp-mkbootimg.sh` 目前只在本机，尚未提交到仓库
