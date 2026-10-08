@@ -77,6 +77,13 @@ jobs:
           # universal_defconfig 没有 LOCALVERSION_AUTO，编译不依赖 git 描述。
           fetch-depth: 1
 
+      # 上游 dts 的 panel@0 绑的是 novatek,nt37801（1440x3200 的手机参考面板），
+      # 本机是 BOE NT36532 3200x2136 双 DSI DSC —— 不打补丁编出来的 dtb 绑错
+      # 驱动，真机必然黑屏。之前 CI 从没应用过这些补丁，所以「编译设备树」
+      # 一步的面板 compatible 断言会直接失败（不是断言太严，是产物本来就错）。
+      - name: 应用本项目内核补丁
+        run: KERNEL_DIR="$PWD/linux" bash tools/apply-kernel-patches.sh
+
       - name: 记录内核版本
         id: kernel
         working-directory: linux
