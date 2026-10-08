@@ -39,8 +39,9 @@ TREE=$(printf '%s\n' "${entries[@]}" \
        | jq -r .sha)
 echo "tree=$TREE"
 
-# 4. 建 commit
-COMMIT=$(jq -n --arg m "fix: 检出本仓库，configs/tools 此前根本不存在于 runner 上" \
+# 4. 建 commit（提交信息可用环境变量 GH_MSG 覆盖，避免所有提交共用一句）
+MSG="${GH_MSG:-update: $(printf '%s ' "$@")}"
+COMMIT=$(jq -n --arg m "$MSG" \
              --arg t "$TREE" --arg p "$PARENT" \
              '{message:$m, tree:$t, parents:[$p]}' \
           | curl -sS -X POST "${hdr[@]}" --data @- "$API/repos/$REPO/git/commits" \
