@@ -192,7 +192,8 @@ Ubuntu 26.04。先做 USB-C U 盘版（Phase 2），跑通后再迁入内部存�
   （`sc8280xp.c:182`）绑定，defconfig 已有 `=m`。注意它**不在** sm8250.c
   （该 commit 的 sm8250.c 匹配表只到 sm8250）。
 - 模块名 `snd-soc-fs19xx.ko` 已加入 workflow 关键模块断言。
-- 剩余：跑 `config_only` CI 确认片段生效（ticket 02 验收项 2）。
+- 剩余：跑 `config_only` CI 确认片段生效（ticket 02 验收项 2）——
+  ✅ run `37728417954`（2026-10-08）`OK CONFIG_SND_SOC_FS19XX=m`，已跑绿。
 
 ### 6.5 工程环境约束（会影响怎么改 CI）
 - **`tools/local/` 被 `.gitignore` 忽略**：本地预取的 `aosp-mkbootimg` 进不了仓库，
@@ -247,7 +248,7 @@ Ubuntu 26.04。先做 USB-C U 盘版（Phase 2），跑通后再迁入内部存�
 
 ## 9. 待办
 
-- [ ] §6.1 回填 `CONTEXT.md` 与 `notes/BUILD-STATUS.md` 的 boot header 版本说法（改为 v2，或标注"待真机裁决"）
+- [x] §6.1 回填 `CONTEXT.md` 与 `notes/BUILD-STATUS.md` 的 boot header 版本说法（改为 v2，或标注"待真机裁决"）—— 已回填（2026-10-08）；ticket 04 产出 v2 产物，真机裁决留 ticket 14
 - [ ] 按 §4 的 frontier 推进：先做 01 / 02 / 03（无 blocker）
 - [ ] §6.2 / §6.3 的待确认项逐条跑完后回填对应 ticket
 - [ ] `xiaomipad-6pro-mainline-main/` 是否入库：483 个文件未提交，需决定（参考物 vs 体积）

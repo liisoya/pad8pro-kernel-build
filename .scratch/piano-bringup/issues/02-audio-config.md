@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** code done, awaiting config_only CI (2026-10-08)
+**Status:** done (2026-10-08，config_only CI 已跑绿)
 
 核实结论（全部对照固定 commit `46999869` 的源码，非推断）：
 - 功放驱动：`SND_SOC_FS19XX` 存在（`sound/soc/codecs/Kconfig:1318`，`fs19xx.c`
@@ -16,8 +16,12 @@
   （注意：不在 sm8250.c —— 该 commit 的 sm8250.c 匹配表只到 sm8250。）
 - 模块名：`snd-soc-fs19xx.ko`（对照 `sound/soc/codecs/Makefile:581`），
   已加入 workflow 关键模块断言。
-- 待办：跑一次 `config_only` CI 验证片段生效（fs19xx 报 =m）；完整构建顺带验证。
+- `config_only` CI 已验证（run `37728417954`，2026-10-08，success 3m57s，
+  headSha = `b316b75`）：步骤 11 打印 `OK CONFIG_SND_SOC_FS19XX=m`、
+  `CONFIG_SND_SOC_SC8280XP=m`；dtb 编译与驱动审计步骤（13）success。
+  `snd-soc-fs19xx.ko` **产物**断言在全量构建步骤（16+，config_only 跳过），
+  由下一次 full CI 顺带验证。
 
 - [x] 必需驱动片段包含音频功放驱动（FS19XX 一族）—— 2026-10-08 已加入
-- [ ] `config_only` CI 跑绿，且生效报告里音频驱动为 `=m`
+- [x] `config_only` CI 跑绿，且生效报告里音频驱动为 `=m` —— run 37728417954
 - [x] 已确认声卡机器驱动在固定 commit 中存在；若不存在，记录缺口与补法 —— `SND_SOC_SC8280XP`，见上

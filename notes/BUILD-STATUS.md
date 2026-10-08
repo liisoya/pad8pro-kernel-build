@@ -97,8 +97,10 @@ gh workflow run build-kernel.yml -R liisoya/pad8pro-kernel-build \
 ## 5. 待办
 
 - [x] 完整构建产物验收（Image / dtb / 模块）—— 见第 1 节
-- [ ] boot.img 打包：目前只产出裸 `Image`，刷机还需要 mkbootimg 打成镜像
-      （`CONFIG_KERNEL_ZSTD=y`，boot header 需 v4+）
+- [x] boot.img 打包（ticket 04，2026-10-08）：`tools/piano-pack.sh bootimg` 实现
+      并本机验证通过 —— header **v2** + `gzip -n -9` 重压（ADR-0001；此前"需 v4+"
+      是早期推断，已修正），unpack 回验 pagesize 4096、kernel/dtb 逐字节回比、
+      cmdline 为空、13.7 MB < boot_a 预算。v2 是否被 piano ABL 接受待 ticket 14 真机裁决。
 - [ ] 面板/键盘驱动是 `=m`，刷机时需要把 `modules-*.tar.zst` 放进 initramfs
 - [ ] 用 `device/dts/android-runtime.dts`（厂商 Android 运行时设备树反编译产物）
       对照上游 dts，核对内存布局 / reserved-memory 差异
