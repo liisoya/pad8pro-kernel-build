@@ -11,3 +11,5 @@ Xiaomi_Pad8Pro*/
 piano_images_*/
 # 本地工具/代理脚本
 gh-proxy
+# 参考实现（yzddmr6/xiaomipad-6pro-mainline，liuqin/SM8475），只读参照不入库
+xiaomipad-6pro-mainline-main/

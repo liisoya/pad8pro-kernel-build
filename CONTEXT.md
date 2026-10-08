@@ -38,8 +38,10 @@ workflow_dispatch 的开关。只跑到 配置 → dtb → 驱动审计，不编
 ## 产物
 
 **Image**
-ARM64 内核镜像。本项目产出的是 **ZSTD 压缩**的（`CONFIG_KERNEL_ZSTD=y`），
-打 boot 镜像时 header 必须是 v4+。
+ARM64 内核镜像，构建产物是**未压缩**的裸 Image。
+`CONFIG_KERNEL_ZSTD=y` 是内核**内置解压算法**的选择，
+**不等于** Image 被 ZSTD 压缩了——别据此推断 boot header 版本。
+打 boot 镜像时另行 `gzip -n -9` 重压，因此 header 用 **v2**，不是 v4（ADR-0001）。
 
 **dtb**
 设备树二进制。本项目只关心 `sm8750-xiaomi-piano.dtb`。

@@ -18,7 +18,7 @@
 | `Image` | 48,429,568 B，`Linux kernel ARM64 boot executable Image` |
 | `sm8750-xiaomi-piano.dtb` | 187,695 B，dtc 反序列化含 `compatible = "xiaomi,piano", "qcom,sm8750"` |
 | 模块 | 8743 个，`INSTALL_MOD_STRIP=1` 后 104 MB（此前未 strip 是 2.9 GB） |
-| Image 压缩 | ZSTD（`CONFIG_KERNEL_ZSTD=y`，boot header 需 v4+） |
+| Image 压缩 | 裸 Image，`arch/arm64/boot/Image` 未压缩 | 打 boot 镜像时另行 `gzip -n -9`，header 用 v2（ADR-0001） |
 | 必需驱动 | 全部为 `=m` 且实际产出 `.ko` |
 
 构建链路本身一开始就是通的：第一次运行（`95f9aff4`）就成功出内核。
@@ -61,6 +61,11 @@
   含 `xiaomi,piano` 与 `novatek,nt36532` 两个 compatible。
 - 模块断言对应的符号全部为 `=m`：`DRM_MSM`、`ATH11K`、`HID_NANOSIC`；
   面板驱动的 Makefile 确认产出 `panel-novatek-nt36532.o`。
+- 音频链路（2026-10-08 核实，ticket 02）：功放 `SND_SOC_FS19XX=m` 已补入
+  required.config（universal_defconfig 只有 FS210X）；声卡机器驱动由
+  `SND_SOC_SC8280XP`（`sc8280xp.c` 匹配表含 `qcom,sm8750-sndcard`）提供，
+  defconfig 已有 `=m`，无缺口。模块名 `snd-soc-fs19xx.ko`（对照
+  `sound/soc/codecs/Makefile`），已加入 workflow 关键模块断言。
 
 ---
 

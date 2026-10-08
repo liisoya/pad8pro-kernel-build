@@ -181,7 +181,7 @@ jobs:
           # 失败时最容易缺的就是这一段：同时打印目标符号与其关键依赖，
           # 一眼看出是「符号不存在」还是「依赖没满足被 kbuild 降到 n」。
           echo "=== olddefconfig 后的实际取值 ==="
-          grep -E '^(CONFIG_DRM_PANEL_NOVATEK_NT36532|CONFIG_HID_NANOSIC|CONFIG_CHARGER_SC8541|CONFIG_CHARGER_SC96231|CONFIG_DRM_MIPI_DSI|CONFIG_BACKLIGHT_CLASS_DEVICE|CONFIG_I2C|CONFIG_DRM_MSM)=' out/.config \
+          grep -E '^(CONFIG_DRM_PANEL_NOVATEK_NT36532|CONFIG_HID_NANOSIC|CONFIG_CHARGER_SC8541|CONFIG_CHARGER_SC96231|CONFIG_SND_SOC_FS19XX|CONFIG_SND_SOC_SC8280XP|CONFIG_DRM_MIPI_DSI|CONFIG_BACKLIGHT_CLASS_DEVICE|CONFIG_I2C|CONFIG_DRM_MSM)=' out/.config \
             || echo "（以上符号一个都没出现）"
 
           echo
@@ -283,7 +283,10 @@ jobs:
           # 整个模块编译（3 小时）成功后被这条断言判失败。
           # 无线必须是 ath12k：piano 用 WCN7850 "Peach"（dmesg cnss-peach），
           # 主线驱动是 ath12k。ath11k 是 liuqin 的 WCN6855 用的，之前写错了。
-          for pat in 'msm.ko' 'ath12k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko'; do
+          # snd-soc-fs19xx：4 个扬声器的功放（foursemi,fs19xx），模块名对过
+          # sound/soc/codecs/Makefile 的 obj-$(CONFIG_SND_SOC_FS19XX) += snd-soc-fs19xx.o，
+          # 不是 fs19xx.ko——吸取 msm.ko 的教训，先查 Makefile 再写断言。
+          for pat in 'msm.ko' 'ath12k*.ko' 'panel-novatek-nt36532.ko' 'hid-nanosic.ko' 'snd-soc-fs19xx.ko'; do
             if ! find out -name "$pat" -print -quit | grep -q .; then
               echo "::error::关键模块缺失: $pat"
               echo "  提示：面板/键盘驱动若显示为 WARN，请检查 configs/pad8pro-required.config"
