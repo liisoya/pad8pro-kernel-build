@@ -1,9 +1,11 @@
 # 草案：liisoya/pad8pro-kernel-build 分支 piano-kubuntu 的工作流
 # 参照 blu-sharky/debian-piano .github/workflows/build.yml 改造。
-# 脚手架阶段仅 workflow_dispatch；debian-piano/ 与 ci/build-kubuntu.sh 实现落齐后再启用 push 触发。
+# push 触发已启用（T18/T19 代码落地）；dispatch 留作手动重跑与 inputs 控制。
 name: piano-kubuntu
 
 on:
+  push:
+    branches: [piano-kubuntu]
   workflow_dispatch:
     inputs:
       kernel_ref:
