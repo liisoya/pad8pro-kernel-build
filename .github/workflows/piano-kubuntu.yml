@@ -122,6 +122,17 @@ jobs:
             fi
           fi
           df -h "$GITHUB_WORKSPACE"
+          # The noble runner's debootstrap may predate Ubuntu 26.04: pull a
+          # debootstrap that carries the resolute suite script from resolute
+          # itself (1.0.142ubuntu2), then remove the temporary source.
+          if [ ! -e /usr/share/debootstrap/scripts/resolute ]; then
+            echo "deb http://archive.ubuntu.com/ubuntu resolute main" | sudo tee /etc/apt/sources.list.d/resolute-debootstrap.list
+            sudo apt-get update
+            sudo apt-get install -y debootstrap
+            sudo rm /etc/apt/sources.list.d/resolute-debootstrap.list
+            test -e /usr/share/debootstrap/scripts/resolute
+            debootstrap --version
+          fi
 
       - name: Restore compiler cache
         uses: actions/cache/restore@v4
