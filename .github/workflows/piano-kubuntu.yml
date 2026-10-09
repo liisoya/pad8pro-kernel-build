@@ -1,0 +1,255 @@
+# 草案：liisoya/pad8pro-kernel-build 分支 piano-kubuntu 的工作流
+# 参照 blu-sharky/debian-piano .github/workflows/build.yml 改造。
+# 脚手架阶段仅 workflow_dispatch；debian-piano/ 与 ci/build-kubuntu.sh 实现落齐后再启用 push 触发。
+name: piano-kubuntu
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: 'linux-piano revision (default piano-7.2.6)'
+        default: piano-7.2.6
+        required: true
+      firmware_ref:
+        description: 'piano-firmware revision'
+        default: main
+        required: false
+      mesa_ref:
+        description: 'piano-mesa revision'
+        default: main
+        required: false
+      sensors_ref:
+        description: 'piano-sensors revision'
+        default: main
+        required: false
+      mipps_ref:
+        description: 'piano-mipps-auth revision'
+        default: main
+        required: false
+
+permissions:
+  contents: read
+  actions: write   # prune older ccache entries of this ref
+
+jobs:
+  build:
+    name: kubuntu-26.04-kde
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 8G
+    steps:
+      - name: Checkout this branch (modified debian-piano + ci/)
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Checkout kernel source
+        uses: actions/checkout@v5
+        with:
+          repository: blu-sharky/linux-piano
+          ref: ${{ inputs.kernel_ref || 'piano-7.2.6' }}
+          path: workspace/linux-piano
+          persist-credentials: false
+
+      - name: Checkout piano firmware
+        uses: actions/checkout@v5
+        with:
+          repository: blu-sharky/piano-firmware
+          ref: ${{ inputs.firmware_ref || 'main' }}
+          path: workspace/piano-firmware
+          persist-credentials: false
+
+      - name: Checkout piano Mesa
+        uses: actions/checkout@v5
+        with:
+          repository: blu-sharky/piano-mesa
+          ref: ${{ inputs.mesa_ref || 'main' }}
+          path: workspace/piano-mesa
+          persist-credentials: false
+
+      - name: Checkout piano sensors
+        uses: actions/checkout@v5
+        with:
+          repository: blu-sharky/piano-sensors
+          ref: ${{ inputs.sensors_ref || 'main' }}
+          path: workspace/piano-sensors
+          persist-credentials: false
+
+      - name: Checkout piano MiPPS authentication
+        uses: actions/checkout@v5
+        with:
+          repository: blu-sharky/piano-mipps-auth
+          ref: ${{ inputs.mipps_ref || 'main' }}
+          path: workspace/piano-mipps-auth
+          persist-credentials: false
+
+      # Loopback video devices (GPL-2.0) for piano-camerad, built against the
+      # image kernel; pinned to the same commit as upstream.
+      - name: Checkout v4l2loopback
+        uses: actions/checkout@v5
+        with:
+          repository: umlaeute/v4l2loopback
+          ref: 0f9ee86760b7f2bea174b7e3e7a1d38845da0ab4
+          path: workspace/v4l2loopback
+          persist-credentials: false
+
+      # m4 macro library for the piano AudioReach topology (BSD-3-Clause);
+      # pinned for reproducibility (same pin as upstream).
+      - name: Checkout AudioReach topology macros
+        uses: actions/checkout@v5
+        with:
+          repository: linux-msm/audioreach-topology
+          ref: 993a17dcb672357998a463a73f120064d6c74f4f
+          path: workspace/audioreach-topology
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              clang lld llvm ccache make flex bison bc libssl-dev libelf-dev \
+              rsync cpio kmod device-tree-compiler debootstrap \
+              ubuntu-archive-keyring curl openssh-client openssl \
+              e2fsprogs python3 zstd xz-utils lz4 m4
+          # 26.04 suite script 可能缺失：优先新 pocket 的 debootstrap，兜底软链（见方案 §4）
+          if [ ! -e /usr/share/debootstrap/scripts/questing ]; then
+            if ls /usr/share/debootstrap/scripts/gutsy >/dev/null 2>&1; then
+              sudo ln -sf gutsy /usr/share/debootstrap/scripts/questing
+            fi
+          fi
+          df -h "$GITHUB_WORKSPACE"
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: piano-kde-clang-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            piano-kde-clang-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Inject dual-boot cmdline into piano_rootfs.config
+        working-directory: workspace/linux-piano
+        run: |
+          cfg=arch/arm64/configs/piano_rootfs.config
+          test -f "$cfg"
+          sed -i 's/^root=PARTLABEL=userdata$/root=PARTLABEL=linux-root/' "$cfg"
+          grep -n '^root=' "$cfg"
+          git diff > "$GITHUB_WORKSPACE/piano_rootfs.config.diff"
+          echo "cmdline-diff-sha256 $(sha256sum "$GITHUB_WORKSPACE/piano_rootfs.config.diff" | cut -d' ' -f1)"
+
+      # 配套组件（必建，序列照抄上游 run 37808998629）：mesa 与内核共享 ccache
+      - name: Build piano Mesa
+        working-directory: workspace
+        run: |
+          piano-mesa/scripts/build-in-container.sh ../out/mesa "$CCACHE_DIR"
+          echo "piano-mesa $(git -C piano-mesa rev-parse HEAD)" > ../out/mesa/SOURCE
+
+      - name: Build piano sensors packages
+        working-directory: workspace
+        run: |
+          piano-sensors/scripts/build-in-container.sh ../out/sensors
+          echo "piano-sensors $(git -C piano-sensors rev-parse HEAD)" > ../out/sensors/SOURCE
+
+      - name: Build piano MiPPS authentication package
+        working-directory: workspace
+        run: |
+          mkdir -p ../out/userspace
+          cp ../out/sensors/runtime/*.deb ../out/userspace/
+          piano-mipps-auth/build-deb.sh "$GITHUB_WORKSPACE/out/userspace/xiaomi-mipps-auth.deb"
+          echo "piano-mipps-auth $(git -C piano-mipps-auth rev-parse HEAD)" > ../out/userspace/SOURCE
+
+      # 一体编排：内核 Image/dtbs/modules -> Kubuntu rootfs -> 镜像/boot/dtbo -> gates
+      # 脚本内部职责见 Bulid/github-actions-build-plan.md §3；gate 全过才出包。
+      - name: Build kernel + Kubuntu rootfs + images
+        working-directory: ${{ github.workspace }}
+        env:
+          SSH_PUBLIC_KEY: ${{ vars.PIANO_SSH_PUBLIC_KEY }}
+        run: |
+          ccache --zero-stats
+          mkdir -p out
+          key_args=()
+          if [ -n "$SSH_PUBLIC_KEY" ]; then
+            printf '%s\n' "$SSH_PUBLIC_KEY" > out/authorized_keys
+            key_args=(--authorized-keys "$PWD/out/authorized_keys")
+          fi
+          ci/build-kubuntu.sh \
+              --kernel-tree workspace/linux-piano \
+              --firmware-tree workspace/piano-firmware/firmware \
+              --mesa-dir out/mesa/runtime \
+              --sensors-dir out/userspace \
+              --v4l2loopback workspace/v4l2loopback \
+              --audioreach-topology workspace/audioreach-topology \
+              --jobs "$(nproc)" \
+              --output out/image \
+              "${key_args[@]}"
+
+      - name: Package flashable bundle and rootfs tarball
+        working-directory: ${{ github.workspace }}
+        run: |
+          # RAM boot 不需要 AVB footer；落盘冷启动到 boot_b 需要（方案 §3 第 7 步）
+          # 双系统路线不发货 userdata.img（若有产物，删除以免误刷）
+          rm -f out/image/userdata.raw.img out/image/userdata.img
+          debian-piano/scripts/sign-boot-avb.sh out/image/boot.img
+          echo "boot.img: AVB-signed after build; flashed sha256 $(sha256sum out/image/boot.img | cut -d' ' -f1)" >> out/image/MANIFEST.txt
+          cat piano_rootfs.config.diff >> out/image/MANIFEST.txt
+          mkdir -p out/bundle out/rootfs-tar
+          cp out/image/boot.img out/image/dtbo.img out/image/kernel.config \
+              out/image/packages.txt out/image/MANIFEST.txt \
+              out/image/SOURCE-SHA256SUMS out/bundle/
+          (cd out/bundle && sha256sum ./* > SHA256SUMS)
+          sudo tar --numeric-owner --xattrs --acls -C out/image/rootfs \
+              -I 'zstd -T0 -3' -cf out/rootfs-tar/rootfs-kubuntu-26.04-arm64.tar.zst .
+          (cd out/rootfs-tar && sha256sum ./* > SHA256SUMS)
+          du -sh out/bundle/* out/rootfs-tar/*
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      # 每 ref 只留一条缓存（照抄上游纪律，防止挤爆 10 GiB 配额）
+      - name: Prune this ref's older compiler caches
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" \
+            --key piano-kde-clang- --limit 100 --json id --jq '.[].id' |
+            xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY"
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: piano-kde-clang-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload flashable boot/dtbo bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: piano-kde-flash-${{ github.sha }}
+          path: out/bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload rootfs tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: piano-kde-rootfs-${{ github.sha }}
+          path: out/rootfs-tar/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload ephemeral access key
+        if: ${{ vars.PIANO_SSH_PUBLIC_KEY == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: piano-access-key-${{ github.sha }}
+          path: out/image/access-key*
+          if-no-files-found: error
+          retention-days: 30
