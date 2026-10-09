@@ -9,7 +9,9 @@ MACROS=$(realpath "${1:?audioreach-topology checkout}")
 DEST=${2:?output firmware directory}
 SRC=$(cd "$(dirname "$0")/../topology" && pwd)
 MODEL='Xiaomi Pad 8 Pro'
-for cmd in m4 alsatplg; do command -v "$cmd" >/dev/null; done
+for cmd in m4 alsatplg; do
+    command -v "$cmd" >/dev/null || { echo "build-topology: missing $cmd" >&2; exit 1; }
+done
 [ -f "$MACROS/audioreach/audioreach.m4" ] || { echo "Not an audioreach-topology tree: $MACROS" >&2; exit 1; }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

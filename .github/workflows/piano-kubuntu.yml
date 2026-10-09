@@ -108,7 +108,7 @@ jobs:
               clang lld llvm ccache make flex bison bc libssl-dev libelf-dev \
               rsync cpio kmod device-tree-compiler debootstrap \
               curl openssh-client openssl \
-              e2fsprogs python3 zstd xz-utils lz4 m4
+              e2fsprogs python3 zstd xz-utils lz4 m4 alsa-utils
           # The Ubuntu runner already trusts the Ubuntu archive (ubuntu-keyring
           # preinstalled; the Debian-side name ubuntu-archive-keyring does not
           # exist here). Assert the keyring our scripts default to.
