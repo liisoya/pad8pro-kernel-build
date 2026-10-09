@@ -132,7 +132,8 @@ stage_images() {
     [ -d "$TOOLS" ] || "$D/scripts/fetch-arm64-tools.sh" --output-dir "$TOOLS"
     FW_ARGS=()
     if [ -n "$FW_TREE" ]; then
-        (cd "$FW_TREE" && sha256sum --check --quiet SHA256SUMS)
+        echo "build-kubuntu: verifying firmware tree $FW_TREE"
+        (cd "$FW_TREE" && sha256sum --check SHA256SUMS)
         cp -a "$FW_TREE" "$STAGE_DIR/firmware"
         FW_ARGS=(--firmware-dir "$STAGE_DIR/firmware")
         [ -z "$TOPOLOGY" ] || "$D/scripts/build-topology.sh" "$TOPOLOGY" "$STAGE_DIR/firmware"

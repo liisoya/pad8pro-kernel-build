@@ -186,7 +186,8 @@ jobs:
             printf '%s\n' "$SSH_PUBLIC_KEY" > out/authorized_keys
             key_args=(--authorized-keys "$PWD/out/authorized_keys")
           fi
-          ci/build-kubuntu.sh \
+          # bash -x: full trace until the pipeline is green (diagnosis aid)
+          bash -x ci/build-kubuntu.sh \
               --kernel-tree workspace/linux-piano \
               --firmware-tree workspace/piano-firmware/firmware \
               --mesa-dir out/mesa/runtime \
