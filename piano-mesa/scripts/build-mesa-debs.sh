@@ -35,6 +35,10 @@ mkdir -p "$OUTPUT"
 OUTPUT=$(realpath "$OUTPUT")
 
 export DEBIAN_FRONTEND=noninteractive
+# The bare ubuntu image has neither curl nor ca-certificates: bootstrap the
+# fetch tooling from the resolute base repos BEFORE adding the kisak source.
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gpg
 # deb-src for the resolute base (the ubuntu container image ships deb-only
 # deb822 sources); kisak PPA as deb + deb-src with its signing key.
 cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/piano-deb-src.sources
@@ -48,7 +52,7 @@ printf 'deb [signed-by=%s] %s resolute main\ndeb-src [signed-by=%s] %s resolute 
     "$keyring" "$PPA_URL" "$keyring" "$PPA_URL" \
     > /etc/apt/sources.list.d/piano-kisak.list
 apt-get update
-apt-get install -y --no-install-recommends build-essential ca-certificates ccache devscripts dpkg-dev curl
+apt-get install -y --no-install-recommends build-essential ccache devscripts dpkg-dev
 # Resolves the kisak source (highest version wins) and its build deps.
 apt-get build-dep -y mesa
 
