@@ -115,14 +115,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
               clang lld llvm ccache make flex bison bc libssl-dev libelf-dev \
               rsync cpio kmod device-tree-compiler debootstrap \
-              ubuntu-archive-keyring curl openssh-client openssl \
+              curl openssh-client openssl \
               e2fsprogs python3 zstd xz-utils lz4 m4
-          # 26.04 suite script 可能缺失：优先新 pocket 的 debootstrap，兜底软链（见方案 §4）
-          if [ ! -e /usr/share/debootstrap/scripts/questing ]; then
-            if ls /usr/share/debootstrap/scripts/gutsy >/dev/null 2>&1; then
-              sudo ln -sf gutsy /usr/share/debootstrap/scripts/questing
-            fi
-          fi
+          # The Ubuntu runner already trusts the Ubuntu archive (ubuntu-keyring
+          # preinstalled; the Debian-side name ubuntu-archive-keyring does not
+          # exist here). Assert the keyring our scripts default to.
+          test -s /usr/share/keyrings/ubuntu-archive-keyring.gpg
           df -h "$GITHUB_WORKSPACE"
           # The noble runner's debootstrap may predate Ubuntu 26.04: pull a
           # debootstrap that carries the resolute suite script from resolute
