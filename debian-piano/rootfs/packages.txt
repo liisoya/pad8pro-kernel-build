@@ -102,6 +102,9 @@ python3
 qbootctl
 qt6-translations-l10n
 rsync
+# display-manager link target; kde-plasma-desktop references it but we pin it
+# explicitly (build dies if the sddm.service link dangles).
+sddm
 sound-theme-freedesktop
 # resolute ships this as kde-spectacle (Debian name "spectacle" is gone;
 # Launchpad-verified 2026-10-09). Same for p7zip-full -> 7zip, glmark2 dropped.
