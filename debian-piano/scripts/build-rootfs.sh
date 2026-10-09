@@ -79,7 +79,7 @@ deb $MIRROR $SUITE-updates main restricted universe multiverse
 deb http://security.ubuntu.com/ubuntu $SUITE-security main restricted universe multiverse
 EOF
 # Bootstrap has no CA store yet; install it using the authenticated archive.
-printf 'deb $MIRROR $SUITE main restricted universe multiverse\n' > "$ROOTFS/etc/apt/sources.list.d/bootstrap.list"
+printf 'deb %s %s main restricted universe multiverse\n' "$MIRROR" "$SUITE" > "$ROOTFS/etc/apt/sources.list.d/bootstrap.list"
 chroot "$ROOTFS" apt-get -o Dir::Etc::sourcelist=sources.list.d/bootstrap.list -o Dir::Etc::sourceparts=- update
 chroot "$ROOTFS" apt-get -o Dir::Etc::sourcelist=sources.list.d/bootstrap.list -o Dir::Etc::sourceparts=- install -y ca-certificates
 rm "$ROOTFS/etc/apt/sources.list.d/bootstrap.list"
