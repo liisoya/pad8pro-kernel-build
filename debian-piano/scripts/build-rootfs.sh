@@ -104,6 +104,14 @@ Package: chromium-browser
 Pin: release o=Ubuntu
 Pin-Priority: -10
 PIN
+# kisak-mesa PPA: the piano-mesa resolute debs depend on libdrm (>= 2.4.134),
+# which only the PPA ships for resolute (archive has 2.4.131; verified
+# 2026-10-09 — the PPA carries the whole libdrm family, uncompressed Packages
+# paths 404, use the index apt resolves itself).
+install -d -m 0755 "$ROOTFS/etc/apt/keyrings" "$ROOTFS/etc/apt/sources.list.d"
+install -m 0644 "$REPO/apt/kisak-mesa.asc" "$ROOTFS/etc/apt/keyrings/kisak-mesa.asc"
+printf 'deb [signed-by=/etc/apt/keyrings/kisak-mesa.asc] https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu resolute main\n' \
+    > "$ROOTFS/etc/apt/sources.list.d/kisak-mesa.list"
 mapfile -t PKGS < <(sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$REPO/rootfs/packages.txt")
 chroot "$ROOTFS" apt-get update
 chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${PKGS[@]}"
