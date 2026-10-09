@@ -65,14 +65,6 @@ jobs:
           path: workspace/piano-firmware
           persist-credentials: false
 
-      - name: Checkout piano Mesa
-        uses: actions/checkout@v5
-        with:
-          repository: blu-sharky/piano-mesa
-          ref: ${{ inputs.mesa_ref || 'main' }}
-          path: workspace/piano-mesa
-          persist-credentials: false
-
       - name: Checkout piano sensors
         uses: actions/checkout@v5
         with:
@@ -156,12 +148,15 @@ jobs:
           git diff > "$GITHUB_WORKSPACE/piano_rootfs.config.diff"
           echo "cmdline-diff-sha256 $(sha256sum "$GITHUB_WORKSPACE/piano_rootfs.config.diff" | cut -d' ' -f1)"
 
-      # 配套组件（必建，序列照抄上游 run 37808998629）：mesa 与内核共享 ccache
+      # 配套组件（必建，序列照抄上游 run 37808998629）：mesa 与内核共享 ccache。
+      # mesa 用本分支 vendored 的 resolute 变体（kisak 源 + A830v1 补丁），
+      # 不是 blu-sharky/piano-mesa 的 Debian trixie 构建（其 deb 依赖
+      # libllvm19/libdisplay-info2，resolute 不可安装——run 37896432396 实证）。
       - name: Build piano Mesa
-        working-directory: workspace
+        working-directory: ${{ github.workspace }}
         run: |
-          piano-mesa/scripts/build-in-container.sh ../out/mesa "$CCACHE_DIR"
-          echo "piano-mesa $(git -C piano-mesa rev-parse HEAD)" > ../out/mesa/SOURCE
+          piano-mesa/scripts/build-in-container.sh out/mesa "$CCACHE_DIR"
+          echo "piano-mesa resolute-variant (vendored; kisak source 26.2.4~kisak1~r + 2061a5ee)" > out/mesa/SOURCE
 
       - name: Build piano sensors packages
         working-directory: workspace
