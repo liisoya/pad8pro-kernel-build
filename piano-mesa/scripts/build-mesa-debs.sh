@@ -25,7 +25,9 @@ OUTPUT=${1:?usage: build-mesa-debs.sh OUTPUT_DIR}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD_ROOT=/build/mesa
 PPA_URL=${KISAK_PPA_URL:-https://ppa.launchpadcontent.net/kisak/kisak-mesa/ubuntu}
-PPA_KEY=${KISAK_KEY_FINGERPRINT:-46555F0DD369CA8A82BCFB94913EA540133323F9}
+# Signing fingerprint taken from the signed InRelease of the PPA
+# (gpg --status-fd ERRSIG issuer fpr), keyserver-verified 2026-10-09.
+PPA_KEY=${KISAK_KEY_FINGERPRINT:-EB8B81E14DA65431D7504EA8F63F0F2B90935439}
 
 die() { echo "build-mesa-debs: $*" >&2; exit 1; }
 
