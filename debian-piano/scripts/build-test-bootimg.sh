@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/build-test-bootimg.sh --kernel-dir DIR --output-dir DIR \
-#       [--dtbo-source PATH]
+#       [--kernel-include PATH] [--dtbo-source PATH]
 #
 # Produces exactly three files in --output-dir:
 #   boot.img      v4 boot image wrapping the kernel Image (which embeds the
@@ -42,12 +42,14 @@ die() {
 KERNEL_DIR=""
 OUTPUT_DIR=""
 DTBO_DTS=""
+KERNEL_INCLUDE=""
 MODE='test'
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --mode) MODE=${2-}; shift 2 ;;
         --kernel-dir) KERNEL_DIR=${2-}; shift 2 ;;
+        --kernel-include) KERNEL_INCLUDE=${2-}; shift 2 ;;
         --output-dir) OUTPUT_DIR=${2-}; shift 2 ;;
         --dtbo-source) DTBO_DTS=${2-}; shift 2 ;;
         -h|--help)    usage ;;
@@ -121,7 +123,8 @@ python3 "$MKBOOTIMG" \
 
 # --- dtbo.img: deterministic overlay ------------------------------------------
 echo "build-test-bootimg: building dtbo.img from $DTBO_DTS"
-python3 "$BUILD_DTBO" --dts "$DTBO_DTS" --output "$OUTPUT_DIR/dtbo.img"
+python3 "$BUILD_DTBO" --dts "$DTBO_DTS" --output "$OUTPUT_DIR/dtbo.img" \
+    ${KERNEL_INCLUDE:+--kernel-include "$KERNEL_INCLUDE"}
 
 # --- verification --------------------------------------------------------------
 echo "build-test-bootimg: verifying round-trips"

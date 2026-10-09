@@ -169,6 +169,7 @@ stage_images() {
     # external ramdisk) + dtbo from dtbo-piano-power.dts; provenance-gated
     # params; round-trip verified inside the script.
     "$D/scripts/build-test-bootimg.sh" --kernel-dir "$O" --output-dir "$OUTPUT" \
+        --kernel-include "$K/include" \
         --dtbo-source "$D/boot/dtbo-piano-power.dts" --mode rootfs
     "${ROOT[@]}" "$D/scripts/assemble-rootfs-image.sh" --rootfs "$BASE/rootfs" \
         --modules "$STAGE_DIR/modules" --kernel-release "$KVER" "${FW_ARGS[@]}" \

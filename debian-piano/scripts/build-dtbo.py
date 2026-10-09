@@ -55,8 +55,7 @@ from pathlib import Path
 MAGIC = 0xD7B7AB1E
 
 
-def build(repo: Path, dts: Path, output: Path, dtc: str) -> None:
-    kinc = repo.parent / "linux-piano" / "include"
+def build(repo: Path, dts: Path, output: Path, dtc: str, kinc: Path) -> None:
     with tempfile.TemporaryDirectory() as td:
         dtb = Path(td) / "overlay.dtb"
         pp = Path(td) / "overlay.pp.dts"
@@ -85,12 +84,16 @@ def main() -> int:
     ap.add_argument("--output", type=Path,
                     default=repo / "out" / "test-image" / "dtbo-piano-bringup.img")
     ap.add_argument("--dtc", default="dtc")
+    ap.add_argument("--kernel-include", type=Path, default=None,
+                    help="kernel source include dir; default assumes a sibling "
+                         "linux-piano checkout (upstream CI layout)")
     args = ap.parse_args()
+    kinc = args.kernel_include or repo.parent / "linux-piano" / "include"
     if not args.dts.is_file():
         print(f"build-dtbo: missing overlay source {args.dts}", file=sys.stderr)
         return 1
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    build(repo, args.dts, args.output, args.dtc)
+    build(repo, args.dts, args.output, args.dtc, kinc)
     return 0
 
 
