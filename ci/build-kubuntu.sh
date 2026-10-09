@@ -1,81 +1,209 @@
-#!/bin/sh
-# ci/build-kubuntu.sh — piano-kubuntu 一体编排（脚手架骨架）
-# 职责：内核 Image/dtbs/modules -> Kubuntu 26.04 rootfs -> 镜像/boot/dtbo -> 产物 gate
-# 方案：Bulid/github-actions-build-plan.md §3（工作区外文档，本仓库不含）
-# 状态：脚手架——参数面已定型，各 stage 待实现（对照上游 debian-piano/scripts）
-set -eu
+#!/usr/bin/env bash
+# ci/build-kubuntu.sh — piano-kubuntu orchestrator (dual-boot Kubuntu 26.04).
+#
+# Faithful adaptation of blu-sharky/xiaomi-piano-linux scripts/build-rootfs-image.sh
+# (workspace pin a75f8c5d) to the dual-boot profile. Differences vs upstream are
+# marked "KUBUNTU-DIFF" inline; everything else mirrors the upstream sequence so
+# the proven boot contract stays intact.
+#
+# Usage:
+#   ci/build-kubuntu.sh [--stage kernel|rootfs|images|all] [upstream options...]
+#
+# KUBUNTU-DIFF summary (vs scripts/build-rootfs-image.sh @ a75f8c5d):
+#   - rootfs suite: resolute (Ubuntu 26.04) via our build-rootfs.sh, not trixie
+#   - kernel cmdline: root=PARTLABEL=linux-root (injected into
+#     piano_rootfs.config by the workflow; this script asserts it)
+#   - kernel release suffix: -piano-kde (injected by the workflow)
+#   - MANIFEST wording: dual-boot safety lines, device-tested: no
+#   - arm64-tools fetched into the output tree when missing
+#   - boot.img requires AVB signing for cold boot (done by the workflow via
+#     scripts/sign-boot-avb.sh); RAM boot works unsigned
+set -euo pipefail
 
-usage() {
-	cat <<EOF
-usage: $0 --kernel-tree DIR --firmware-tree DIR --audioreach-topology DIR
-          [--mesa-dir DIR] [--sensors-dir DIR] [--v4l2loopback DIR]
-          [--jobs N] [--authorized-keys FILE] --output DIR
-EOF
-	exit 2
-}
+usage() { sed -n '2,30p' "$0"; exit 2; }
+die() { echo "build-kubuntu: error: $*" >&2; exit 1; }
 
-kernel_tree=$(pwd)/linux-piano
-firmware_tree=$(pwd)/piano-firmware/firmware
-topology_dir=$(pwd)/audioreach-topology
-mesa_dir=
-sensors_dir=
-v4l2loopback_dir=
-jobs=$(nproc)
-authorized_keys=
-output=$(pwd)/out/image
+STAGE=all JOBS=$(nproc) OUTPUT='' BASE='' KEYS='' SIZE=8G
+KERNEL_TREE='' FW_TREE='' MESA_DIR='' SENSORS_DIR='' TOPOLOGY='' LOOPBACK=''
 
 while [ $# -gt 0 ]; do
-	case $1 in
-	--kernel-tree)          kernel_tree=$2; shift 2 ;;
-	--firmware-tree)        firmware_tree=$2; shift 2 ;;
-	--audioreach-topology)  topology_dir=$2; shift 2 ;;
-	--mesa-dir)             mesa_dir=$2; shift 2 ;;
-	--sensors-dir)          sensors_dir=$2; shift 2 ;;
-	--v4l2loopback)         v4l2loopback_dir=$2; shift 2 ;;
-	--jobs)                 jobs=$2; shift 2 ;;
-	--authorized-keys)      authorized_keys=$2; shift 2 ;;
-	--output)               output=$2; shift 2 ;;
-	*) usage ;;
-	esac
+    case "$1" in
+        --stage) STAGE=${2:?}; shift 2 ;;
+        --jobs) JOBS=${2:?}; shift 2 ;;
+        --output) OUTPUT=$(realpath -m "${2:?}"); shift 2 ;;
+        --rootfs-build) BASE=$(realpath "${2:?}"); shift 2 ;;
+        --authorized-keys) KEYS=$(realpath "${2:?}"); shift 2 ;;
+        --image-size) SIZE=${2:?}; shift 2 ;;
+        --kernel-tree) KERNEL_TREE=$(realpath "${2:?}"); shift 2 ;;
+        --firmware-tree) FW_TREE=$(realpath "${2:?}"); shift 2 ;;
+        --mesa-dir) MESA_DIR=$(realpath "${2:?}"); shift 2 ;;
+        --sensors-dir) SENSORS_DIR=$(realpath "${2:?}"); shift 2 ;;
+        --audioreach-topology) TOPOLOGY=$(realpath "${2:?}"); shift 2 ;;
+        --v4l2loopback) LOOPBACK=$(realpath "${2:?}"); shift 2 ;;
+        -h|--help) usage ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+case "$STAGE" in kernel|rootfs|images|all) ;; *) die '--stage must be kernel|rootfs|images|all' ;;
+esac
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "--jobs must be positive (got '$JOBS')"
+[ -n "$KERNEL_TREE" ] || die '--kernel-tree is required'
+[ -n "$OUTPUT" ] || die '--output is required'
+[ ! -e "$OUTPUT" ] || die 'output exists; choose a fresh directory'
+[ -f "$KERNEL_TREE/Makefile" ] || die "$KERNEL_TREE does not look like a kernel tree"
+[ -f "$KERNEL_TREE/arch/arm64/configs/piano_defconfig" ] || die 'piano_defconfig missing'
+# KUBUNTU-DIFF: the workflow must have injected the dual-boot cmdline and
+# release suffix before calling us; assert instead of trusting.
+ROOTCFG="$KERNEL_TREE/arch/arm64/configs/piano_rootfs.config"
+grep -q 'root=PARTLABEL=linux-root' "$ROOTCFG" || die 'piano_rootfs.config lacks root=PARTLABEL=linux-root (workflow injection missing)'
+grep -q 'root=PARTLABEL=userdata' "$ROOTCFG" && die 'piano_rootfs.config still contains root=PARTLABEL=userdata'
+grep -q 'CONFIG_LOCALVERSION="-piano-kde"' "$ROOTCFG" || die 'piano_rootfs.config lacks the -piano-kde release suffix'
+
+for cmd in clang ld.lld cpio depmod modinfo dtc python3 mkfs.ext4 dumpe2fs; do
+    command -v "$cmd" >/dev/null || die "missing $cmd"
 done
 
-[ -d "$kernel_tree" ] || { echo "FATAL: kernel tree missing: $kernel_tree" >&2; exit 1; }
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+D=$REPO/debian-piano
+K=$KERNEL_TREE
+O=$K/out/rootfs-image
+STAGE_DIR=$OUTPUT/stage
+TOOLS=$OUTPUT/arm64-tools
+ROOT=()
+if [ "$STAGE" != kernel ]; then
+    if [ "$(id -u)" != 0 ]; then ROOT=(sudo); sudo -v; fi
+fi
+mkdir -p "$OUTPUT" "$STAGE_DIR"
+OUTPUT=$(realpath "$OUTPUT")
+if [ -z "$KEYS" ]; then
+    ssh-keygen -q -t ed25519 -N '' -C piano -f "$OUTPUT/access-key"
+    KEYS=$OUTPUT/access-key.pub
+fi
+
+MAKE=(make -C "$K" ARCH=arm64 LLVM=1 O="$O")
+if command -v ccache >/dev/null; then MAKE+=("CC=ccache clang"); fi
 
 stage_kernel() {
-	# TODO: make O=out ARCH=arm64 LLVM=1 piano_defconfig + Image dtbs modules
-	# modules_install 到 rootfs 树（strip 后）；vermagic 记录进 manifest
-	echo "NOT-IMPLEMENTED: stage_kernel" >&2
-	exit 1
+    mkdir -p "$O"
+    "${MAKE[@]}" piano_defconfig
+    # piano_rootfs.config is a kconfig fragment merged after piano_defconfig
+    # (upstream recipe; do not "simplify" into a single defconfig).
+    "$K/scripts/kconfig/merge_config.sh" -m -O "$O" "$O/.config" "$ROOTCFG"
+    "${MAKE[@]}" olddefconfig
+    rm -f "$O/include/config/kernel.release" "$O/include/generated/utsrelease.h" "$O/.version"
+    "${MAKE[@]}" prepare
+    find "$O" \( -name '*.mod.c' -o -name '*.ko' \) -delete
+    "${MAKE[@]}" -j"$JOBS" Image modules
+    KVER=$(cat "$O/include/config/kernel.release")
+    "${MAKE[@]}" -j"$JOBS" modules_install INSTALL_MOD_PATH="$STAGE_DIR/modules" INSTALL_MOD_STRIP=1
+    if [ -n "$LOOPBACK" ]; then
+        cp -a "$LOOPBACK" "$STAGE_DIR/v4l2loopback"
+        rm -rf "$STAGE_DIR/v4l2loopback/.git"
+        "${MAKE[@]}" -j"$JOBS" M="$STAGE_DIR/v4l2loopback" modules
+        "${MAKE[@]}" M="$STAGE_DIR/v4l2loopback" modules_install INSTALL_MOD_PATH="$STAGE_DIR/modules" \
+            INSTALL_MOD_DIR=updates INSTALL_MOD_STRIP=1
+    fi
+    # Upstream gate: every installed module must carry the built release.
+    while IFS= read -r -d '' ko; do
+        [[ "$(modinfo -F vermagic "$ko")" == "$KVER "* ]] || { echo "Stale module: $ko" >&2; exit 1; }
+    done < <(find "$STAGE_DIR/modules" -name '*.ko*' -print0)
+    echo "build-kubuntu: kernel OK ($KVER)"
 }
 
 stage_rootfs() {
-	# TODO: 改造版 debian-piano/scripts/build-rootfs.sh
-	# suite=questing/26.04、kde-plasma-desktop + sddm、zh_CN/Asia/Shanghai、
-	# fcitx5、去 snapd、压缩工具、--mesa-dir/--sensors-dir 装入必建组件
-	echo "NOT-IMPLEMENTED: stage_rootfs" >&2
-	exit 1
+    if [ -z "$BASE" ]; then
+        BASE=$OUTPUT/rootfs-build
+        "${ROOT[@]}" "$D/scripts/build-rootfs.sh" --suite resolute --output "$BASE" --authorized-keys "$KEYS" \
+            ${MESA_DIR:+--mesa-dir "$MESA_DIR"} ${SENSORS_DIR:+--userspace-dir "$SENSORS_DIR"}
+    fi
+    [ -f "$BASE/COMPLETE" ] || die 'Rootfs bootstrap incomplete'
+    # A reused base gets the same key as the new rescue image.
+    for home in root home/piano; do
+        "${ROOT[@]}" install -m 0600 "$KEYS" "$BASE/rootfs/$home/.ssh/authorized_keys"
+    done
+    "${ROOT[@]}" chroot "$BASE/rootfs" chown -R piano:piano /home/piano/.ssh
+    echo "build-kubuntu: rootfs OK ($BASE)"
 }
 
 stage_images() {
-	# TODO: assemble-rootfs-image.sh（内容量+8GiB）、build-initramfs.sh --mode rootfs
-	# （等待分区 PARTLABEL=linux-root）、build-bootimg.sh（v4/4096/gzip，<96MiB）、
-	# build-dtbo.py
-	echo "NOT-IMPLEMENTED: stage_images" >&2
-	exit 1
+    [ -n "${KVER:-}" ] || KVER=$(cat "$O/include/config/kernel.release")
+    [ -d "$STAGE_DIR/modules/lib/modules/$KVER" ] || die 'kernel stage outputs missing (run --stage kernel first)'
+    [ -n "$BASE" ] && [ -f "$BASE/COMPLETE" ] || die 'rootfs stage outputs missing (run --stage rootfs first)'
+    [ -d "$TOOLS" ] || "$D/scripts/fetch-arm64-tools.sh" --output-dir "$TOOLS"
+    FW_ARGS=()
+    if [ -n "$FW_TREE" ]; then
+        (cd "$FW_TREE" && sha256sum --check --quiet SHA256SUMS)
+        cp -a "$FW_TREE" "$STAGE_DIR/firmware"
+        FW_ARGS=(--firmware-dir "$STAGE_DIR/firmware")
+        [ -z "$TOPOLOGY" ] || "$D/scripts/build-topology.sh" "$TOPOLOGY" "$STAGE_DIR/firmware"
+    else
+        die '--firmware-tree is required (dual boot never ships without audio topology inputs)'
+    fi
+    "${MAKE[@]}" headers_install INSTALL_HDR_PATH="$STAGE_DIR/uapi"
+    "$D/scripts/build-touch-view.sh" --uapi "$STAGE_DIR/uapi" --sysroot "$TOOLS/musl-sysroot" --output "$STAGE_DIR/piano-touch-view"
+    "$D/scripts/build-touch-view.sh" --uapi "$STAGE_DIR/uapi" --sysroot "$TOOLS/musl-sysroot" \
+        --source "$D/camera/piano-camerad.c" --output "$STAGE_DIR/piano-camerad"
+    # Neither UFS host nor PHY may probe before the initramfs debug network.
+    UFS_MODULES=()
+    for module in phy_qcom_qmp_ufs ufs_qcom; do
+        dependencies=$(modprobe -S "$KVER" -d "$STAGE_DIR/modules" --show-depends "$module")
+        while read -r kind ko rest; do
+            [ "$kind" != insmod ] || UFS_MODULES+=(--module "$ko")
+        done <<< "$dependencies"
+    done
+    [ "${#UFS_MODULES[@]}" -gt 0 ] || die 'Missing UFS module closure'
+    "$D/scripts/build-initramfs.sh" --mode rootfs --busybox "$TOOLS/busybox" \
+        --dropbear-tree "$TOOLS/dropbear/tree" --authorized-keys "$KEYS" \
+        --kernel-version "$KVER" "${UFS_MODULES[@]}" --output "$STAGE_DIR/initramfs.cpio.gz"
+    "$K/scripts/config" --file "$O/.config" --set-str INITRAMFS_SOURCE "$STAGE_DIR/initramfs.cpio.gz"
+    "${MAKE[@]}" olddefconfig
+    for option in CONFIG_CMDLINE_FORCE=y CONFIG_EXT4_FS=y CONFIG_DRM_SIMPLEDRM=y \
+        CONFIG_SCSI_UFSHCD=m CONFIG_SCSI_UFS_QCOM=m CONFIG_PHY_QCOM_QMP_UFS=m CONFIG_USB_CONFIGFS_NCM=y \
+        CONFIG_PINCTRL_SM8750=m CONFIG_QCOM_GPI_DMA=m CONFIG_PHY_QCOM_QMP_PCIE=m; do
+        grep -qxF "$option" "$O/.config" || die "Required: $option"
+    done
+    "${MAKE[@]}" -j"$JOBS" Image
+    [ "$(cat "$O/include/config/kernel.release")" = "$KVER" ] || die 'kernel release changed after INITRAMFS_SOURCE rebuild'
+    # Upstream rootfs mode: boot.img (v4, kernel-embedded initramfs, empty
+    # external ramdisk) + dtbo from dtbo-piano-power.dts; provenance-gated
+    # params; round-trip verified inside the script.
+    "$D/scripts/build-test-bootimg.sh" --kernel-dir "$O" --output-dir "$OUTPUT" \
+        --dtbo-source "$D/boot/dtbo-piano-power.dts" --mode rootfs
+    "${ROOT[@]}" "$D/scripts/assemble-rootfs-image.sh" --rootfs "$BASE/rootfs" \
+        --modules "$STAGE_DIR/modules" --kernel-release "$KVER" "${FW_ARGS[@]}" \
+        --touch-view "$STAGE_DIR/piano-touch-view" --camera-daemon "$STAGE_DIR/piano-camerad" --busybox "$TOOLS/busybox/busybox" \
+        --output-dir "$OUTPUT" --image-size "$SIZE"
+    cp "$BASE/build-manifest.txt" "$OUTPUT/packages.txt"
+    cp "$O/.config" "$OUTPUT/kernel.config"
+    {
+        sha256sum "$ROOTCFG" "$REPO/ci/build-kubuntu.sh"
+        (cd "$D" && git ls-files -z --cached --others --exclude-standard | sort -zu | xargs -0 sha256sum)
+    } > "$OUTPUT/SOURCE-SHA256SUMS"
+    {
+        echo "Piano Kubuntu dual-boot image set"
+        if [ -n "$FW_TREE" ]; then
+            echo "firmware=piano-firmware $(git -C "$FW_TREE" rev-parse HEAD 2>/dev/null || echo unknown); see its README compliance statement"
+        fi
+        echo "kernel=$KVER"
+        for repo in "$REPO" "$K"; do
+            echo "source=$repo $(git -C "$repo" rev-parse HEAD)"
+            git -C "$repo" diff --binary HEAD | sha256sum
+        done
+        echo 'KUBUNTU-DIFF: root=PARTLABEL=linux-root; ext4; KDE Plasma (resolute); device-tested: no'
+        echo 'Dual boot: slot A stays stock Android; only boot_b/dtbo_b and the linux-root partition are ours.'
+        echo 'WARNING: writing the linux-root partition is irreversible for its contents; keep persist untouched.'
+        echo 'WARNING: flashing userdata destroys Android data; never fastboot flash userdata.'
+        echo 'Keep stock slot A, vendor_boot and init_boot. Never flash bootloader-chain partitions.'
+        echo 'Check current-slot=b and partition sizes before any write; RAM boot preferred.'
+        (cd "$OUTPUT" && sha256sum boot.img dtbo.img kernel.config SOURCE-SHA256SUMS)
+        (cd "$OUTPUT" && sha256sum userdata.img userdata.raw.img packages.txt)
+    } > "$OUTPUT/MANIFEST.txt"
+    echo "Built $OUTPUT; see MANIFEST.txt. No device writes performed."
 }
 
-stage_gates() {
-	# TODO: COMPLETE 标记、e2fsck -fn、vermagic 逐模块校验、bootimg round-trip、
-	# params provenance gate、SDDM 断言（display-manager -> sddm）
-	echo "NOT-IMPLEMENTED: stage_gates" >&2
-	exit 1
-}
-
-case ${1:-all} in
-kernel)  stage_kernel ;;
-rootfs)  stage_rootfs ;;
-images)  stage_images ;;
-gates)   stage_gates ;;
-all)     stage_kernel && stage_rootfs && stage_images && stage_gates ;;
-*)       usage ;;
+case "$STAGE" in
+    kernel) stage_kernel ;;
+    rootfs) stage_rootfs ;;
+    images) stage_images ;;
+    all)    stage_kernel; stage_rootfs; stage_images ;;
 esac

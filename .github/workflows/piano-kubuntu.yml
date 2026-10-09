@@ -134,10 +134,14 @@ jobs:
       - name: Inject dual-boot cmdline into piano_rootfs.config
         working-directory: workspace/linux-piano
         run: |
+          # cmdline sits inside CONFIG_CMDLINE="..." and the release suffix in
+          # CONFIG_LOCALVERSION — substring replaces, verified against the
+          # actual fragment (lines CONFIG_CMDLINE / CONFIG_LOCALVERSION).
           cfg=arch/arm64/configs/piano_rootfs.config
           test -f "$cfg"
-          sed -i 's/^root=PARTLABEL=userdata$/root=PARTLABEL=linux-root/' "$cfg"
-          grep -n '^root=' "$cfg"
+          sed -i 's/root=PARTLABEL=userdata/root=PARTLABEL=linux-root/; s/CONFIG_LOCALVERSION="-piano-gnome"/CONFIG_LOCALVERSION="-piano-kde"/' "$cfg"
+          grep -n 'root=PARTLABEL=\|CONFIG_LOCALVERSION' "$cfg"
+          grep -q 'root=PARTLABEL=linux-root' "$cfg" || { echo 'cmdline injection failed' >&2; exit 1; }
           git diff > "$GITHUB_WORKSPACE/piano_rootfs.config.diff"
           echo "cmdline-diff-sha256 $(sha256sum "$GITHUB_WORKSPACE/piano_rootfs.config.diff" | cut -d' ' -f1)"
 
