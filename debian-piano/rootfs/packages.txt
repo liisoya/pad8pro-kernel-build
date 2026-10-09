@@ -41,7 +41,6 @@ fcitx5-chinese-addons
 google-chrome-stable
 gwenview
 git
-glmark2
 gstreamer1.0-libav
 # GStreamer players decode on the Iris codec through the V4L2 stateful
 # decoders (plugins-good) and need the stream parsers from plugins-bad.
@@ -104,7 +103,9 @@ qbootctl
 qt6-translations-l10n
 rsync
 sound-theme-freedesktop
-spectacle
+# resolute ships this as kde-spectacle (Debian name "spectacle" is gone;
+# Launchpad-verified 2026-10-09). Same for p7zip-full -> 7zip, glmark2 dropped.
+kde-spectacle
 strace
 sudo
 systemd-sysv
@@ -134,5 +135,5 @@ xwayland
 xz-utils
 zip
 unzip
-p7zip-full
+7zip
 zstd
