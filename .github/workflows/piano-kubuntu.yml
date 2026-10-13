@@ -148,6 +148,25 @@ jobs:
           git diff > "$GITHUB_WORKSPACE/piano_rootfs.config.diff"
           echo "cmdline-diff-sha256 $(sha256sum "$GITHUB_WORKSPACE/piano_rootfs.config.diff" | cut -d' ' -f1)"
 
+      # Kernel patch series (ADR-0006: 基线 + 补丁集，组件即目录)。按文件名序 apply；
+      # --check 先行 fail-closed，任何 fuzz/冲突直接失败不出包。补丁 diff hash 进日志。
+      - name: Apply kernel patch series
+        working-directory: workspace/linux-piano
+        run: |
+          patchdir="$GITHUB_WORKSPACE/ci/kernel-patches"
+          if ! compgen -G "$patchdir/*.patch" >/dev/null; then
+            echo "no kernel patches; baseline as-is"
+            exit 0
+          fi
+          for p in $(ls "$patchdir"/*.patch | LC_ALL=C sort); do
+            echo "applying $(basename "$p")"
+            git apply --check "$p" || { echo "PATCH NOT CLEAN: $p" >&2; exit 1; }
+            git apply "$p"
+            sha256sum "$p"
+          done
+          git diff > "$GITHUB_WORKSPACE/kernel-patches.diff"
+          echo "kernel-patches-diff-sha256 $(sha256sum "$GITHUB_WORKSPACE/kernel-patches.diff" | cut -d' ' -f1)"
+
       # 配套组件（必建，序列照抄上游 run 37808998629）：mesa 与内核共享 ccache。
       # mesa 用本分支 vendored 的 resolute 变体（kisak 源 + A830v1 补丁），
       # 不是 blu-sharky/piano-mesa 的 Debian trixie 构建（其 deb 依赖
@@ -207,6 +226,7 @@ jobs:
           debian-piano/scripts/sign-boot-avb.sh out/image/boot.img
           echo "boot.img: AVB-signed after build; flashed sha256 $(sha256sum out/image/boot.img | cut -d' ' -f1)" >> out/image/MANIFEST.txt
           cat piano_rootfs.config.diff >> out/image/MANIFEST.txt
+          [ ! -f kernel-patches.diff ] || { echo '--- kernel patch series ---' >> out/image/MANIFEST.txt; cat kernel-patches.diff >> out/image/MANIFEST.txt; }
           mkdir -p out/bundle out/rootfs-tar
           cp out/image/boot.img out/image/dtbo.img out/image/kernel.config \
               out/image/packages.txt out/image/MANIFEST.txt \
